@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Agenda</h1>
+    <select id="agenda-status">
+      <option value="">All</option>
+      <option value="agenda_hit">Hits</option>
+      <option value="not_target_project">Not target</option>
+      <option value="needs_agenda_review">Needs review</option>
+    </select>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Date</th><th>Event</th><th>Item</th><th>Status</th><th>Confidence</th><th>Description</th><th>Reason</th></tr>
+      </thead>
+      <tbody id="agenda-body"></tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

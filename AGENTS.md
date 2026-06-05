@@ -1,0 +1,9 @@
+- Consider downstream effects of each change and attempt to correct them initially.
+- Check for code in repo that has deprecated as a result of project evolution, remove it.
+- Dashboards should be built for elegance and simplicity.
+- Check for design clashing and write code for efficient resource usage.
+- Make all functions as small as possible with comments.
+- Assume application builds are going to be used on vanilla machines without globally installed dependencies.
+- Write code with OOP methodology.
+- Add functionality comments.
+- GitHub username renamed from "nerdi-boi" to "jaiprototypes".

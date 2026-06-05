@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Review</h1>
+    <div class="export-tools">
+      <form id="export-form" class="export-form">
+        <input name="output" value="data/exports/madison_review.xlsx">
+        <button type="submit">Export Accepted</button>
+      </form>
+      <form id="label-export-form" class="export-form compact">
+        <input name="output" value="data/exports/madison_labels.docx">
+        <button type="submit">Download Avery Labels</button>
+      </form>
+    </div>
+  </div>
+  <div id="review-list" class="cards"></div>
+</section>
+{% endblock %}

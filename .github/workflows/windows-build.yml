@@ -1,0 +1,35 @@
+name: Build Windows Desktop Launcher
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Build Windows executable
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Build launcher
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlanCommissionWorkbench-windows
+          path: artifacts/PlanCommissionWorkbench-windows.zip
+          if-no-files-found: error

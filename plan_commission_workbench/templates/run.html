@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Run</h1>
+    <div id="health" class="status-pill">OpenAI</div>
+  </div>
+  <form id="run-form" class="run-form">
+    <label>
+      From
+      <input name="date_from" type="date" required>
+    </label>
+    <label>
+      To
+      <input name="date_to" type="date" required>
+    </label>
+    <label class="wide">
+      Run request
+      <input name="request_text" type="text" placeholder="Optional">
+    </label>
+    <button type="submit">Start Run</button>
+  </form>
+</section>
+
+<section class="grid two">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Runs</h2>
+      <button id="refresh-runs" type="button">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Dates</th><th>Status</th><th>Agenda</th><th>Apps</th><th></th></tr>
+        </thead>
+        <tbody id="runs-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Log</h2>
+      <span id="log-run" class="muted"></span>
+    </div>
+    <div id="run-events" class="log"></div>
+  </div>
+</section>
+{% endblock %}

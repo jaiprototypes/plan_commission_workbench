@@ -1,0 +1,319 @@
+const page = document.body.dataset.page;
+let openAiKeyPromptShown = false;
+
+function $(selector) {
+  return document.querySelector(selector);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function getJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const message = await response.text();
+    try {
+      throw new Error(JSON.parse(message).detail || message);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error(message);
+      throw error;
+    }
+  }
+  return response.json();
+}
+
+function statusClass(status) {
+  if (["completed", "accepted", "application_extracted", "agenda_hit"].includes(status)) return "ok";
+  if (String(status || "").startsWith("failed") || status === "rejected") return "fail";
+  return "warn";
+}
+
+async function loadHealth(options = {}) {
+  const node = $("#health");
+  if (!node) return;
+  const health = await getJson("/health");
+  const openai = health.openai || {};
+  const ready = openai.api_key_present && openai.package_available;
+  node.className = `status-pill ${ready ? "ok" : "warn"}`;
+  node.textContent = ready ? `OpenAI ${openai.model}` : openai.api_key_present ? "OpenAI package not ready" : "OpenAI key required";
+  node.title = ready ? "OpenAI is ready" : "Click to enter a credited OpenAI API key for this session";
+  if (!openai.api_key_present && options.prompt && !openAiKeyPromptShown) {
+    openAiKeyPromptShown = true;
+    await promptForOpenAiKey();
+  }
+}
+
+async function promptForOpenAiKey() {
+  const apiKey = window.prompt("Enter a credited OpenAI API key for this workbench session:");
+  if (!apiKey) return;
+  await getJson("/settings/openai-api-key", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({api_key: apiKey}),
+  });
+  await loadHealth();
+}
+
+async function loadRuns() {
+  const body = $("#runs-body");
+  if (!body) return;
+  const rows = await getJson("/runs");
+  body.innerHTML = rows.map((row) => `
+    <tr>
+      <td>${row.id}</td>
+      <td>${escapeHtml(row.date_from)} to ${escapeHtml(row.date_to)}</td>
+      <td class="${statusClass(row.status)}">${escapeHtml(row.status)}</td>
+      <td>${row.agenda_hits || 0}/${row.agenda_total || 0}</td>
+      <td>${row.applications_extracted || 0}/${row.applications_total || 0}</td>
+      <td><button class="secondary" data-events="${row.id}" type="button">Log</button></td>
+    </tr>
+  `).join("");
+  body.querySelectorAll("[data-events]").forEach((button) => {
+    button.addEventListener("click", () => loadRunEvents(button.dataset.events));
+  });
+  if (rows[0]) loadRunEvents(rows[0].id);
+}
+
+async function loadRunEvents(runId) {
+  const list = $("#run-events");
+  const label = $("#log-run");
+  if (!list || !runId) return;
+  const events = await getJson(`/runs/${runId}/events`);
+  if (label) label.textContent = `Run ${runId}`;
+  list.innerHTML = events.map((event) => `
+    <div class="log-line">
+      <strong>${escapeHtml(event.timestamp)}</strong>
+      ${escapeHtml(event.stage)} ${escapeHtml(event.component)}
+      ${event.source_identity ? `[${escapeHtml(event.source_identity)}]` : ""}
+      <br>${escapeHtml(event.message)}
+    </div>
+  `).join("");
+}
+
+function setupRunPage() {
+  loadHealth({prompt: true}).catch((error) => alert(error.message));
+  loadRuns().catch(console.error);
+  $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
+  $("#refresh-runs")?.addEventListener("click", () => loadRuns().catch(console.error));
+  $("#run-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      date_from: form.get("date_from"),
+      date_to: form.get("date_to"),
+      request_text: form.get("request_text") || null,
+    };
+    const run = await getJson("/runs/madison", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    await loadRuns();
+    await loadRunEvents(run.run_id);
+  });
+  setInterval(() => loadRuns().catch(() => {}), 6000);
+}
+
+async function loadAgenda() {
+  const body = $("#agenda-body");
+  if (!body) return;
+  const status = $("#agenda-status")?.value || "";
+  const rows = await getJson(`/agenda-items${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+  body.innerHTML = rows.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.meeting_date)}</td>
+      <td>${escapeHtml(row.event_id)}</td>
+      <td>${escapeHtml(row.city_item_id)}</td>
+      <td class="${statusClass(row.classification)}">${escapeHtml(row.classification)}</td>
+      <td>${Number(row.confidence || 0).toFixed(2)}</td>
+      <td>${escapeHtml(row.description)}</td>
+      <td>${escapeHtml(row.reason)}</td>
+    </tr>
+  `).join("");
+}
+
+function contactBlock(title, prefix, row) {
+  const fields = ["name", "company", "mailing_address", "phone", "email"]
+    .map((field) => row[`${prefix}_${field}`])
+    .filter((value) => String(value ?? "").trim())
+    .map((value) => `<p>${escapeHtml(value)}</p>`)
+    .join("");
+  return `
+    <div class="field-block">
+      <h3>${title}</h3>
+      ${fields || '<p class="muted">No populated fields</p>'}
+    </div>
+  `;
+}
+
+function sourceAttributeRow(item) {
+  const value = String(item.value ?? "").trim() || "No extracted value";
+  const confidence = Number(item.confidence ?? 0).toFixed(2);
+  return `
+    <tr>
+      <td>${escapeHtml(item.field_name)}</td>
+      <td>${escapeHtml(value)}</td>
+      <td>${escapeHtml(item.evidence_snippet)}</td>
+      <td>${confidence}</td>
+    </tr>
+  `;
+}
+
+function sourceAttributes(evidence) {
+  if (!evidence?.length) return "";
+  const rows = evidence.map(sourceAttributeRow).join("");
+  return `
+    <details class="source-attributes">
+      <summary>Raw source attributes (${evidence.length})</summary>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Extracted value</th>
+              <th>Docling source text</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function applicationCard(row, review = false) {
+  const rawAttributes = sourceAttributes(row.evidence || []);
+  const actions = review ? `
+    <div class="review-actions">
+      <textarea data-corrections="${row.id}" placeholder='{"applicant_name":"Corrected value"}'></textarea>
+      <input data-notes="${row.id}" placeholder="Notes">
+      <button data-accept="${row.id}" type="button">Accept</button>
+      <button data-reject="${row.id}" class="danger" type="button">Reject</button>
+    </div>
+  ` : "";
+  return `
+    <article class="card">
+      <div class="card-head">
+        <strong>${escapeHtml(row.meeting_date)} | Item ${escapeHtml(row.city_item_id)}</strong>
+        <span class="${statusClass(row.status)}">${escapeHtml(row.status)}</span>
+      </div>
+      <div class="fields">
+        ${contactBlock("Applicant", "applicant", row)}
+        ${contactBlock("Project Contact", "project_contact", row)}
+        ${contactBlock("Owner", "owner", row)}
+      </div>
+      <div class="evidence">
+        <p><strong>Target:</strong> ${row.target_project === 0 ? "No" : row.target_project === 1 ? "Yes" : "Unknown"} ${row.target_reason ? `- ${escapeHtml(row.target_reason)}` : ""}</p>
+        <p><strong>Section 5:</strong> ${escapeHtml(row.section5_description)}</p>
+        <p><strong>Units:</strong> ${escapeHtml(row.unit_count)}</p>
+      </div>
+      ${rawAttributes}
+      ${actions}
+    </article>
+  `;
+}
+
+function rejectedApplicationsDropdown(rows) {
+  if (!rows.length) return "";
+  const cards = rows.map((row) => applicationCard(row)).join("");
+  return `
+    <details class="rejected-applications">
+      <summary>Rejected applications (${rows.length})</summary>
+      <div class="cards nested-cards">${cards}</div>
+    </details>
+  `;
+}
+
+async function loadApplications() {
+  const list = $("#applications-list");
+  if (!list) return;
+  const status = $("#application-status")?.value || "";
+  const rows = await getJson(`/application-extractions${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+  if (!status) {
+    const activeRows = rows.filter((row) => row.status !== "rejected");
+    const rejectedRows = rows.filter((row) => row.status === "rejected");
+    list.innerHTML = activeRows.map((row) => applicationCard(row)).join("") + rejectedApplicationsDropdown(rejectedRows);
+    return;
+  }
+  list.innerHTML = rows.map((row) => applicationCard(row)).join("");
+}
+
+async function submitReview(id, status) {
+  const correctionText = document.querySelector(`[data-corrections="${id}"]`)?.value.trim();
+  const notes = document.querySelector(`[data-notes="${id}"]`)?.value.trim();
+  let corrected_fields = {};
+  if (correctionText) corrected_fields = JSON.parse(correctionText);
+  await getJson(`/application-extractions/${id}/review`, {
+    method: "PATCH",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({status, corrected_fields, notes}),
+  });
+  await loadReview();
+}
+
+async function loadReview() {
+  const list = $("#review-list");
+  if (!list) return;
+  const rows = await getJson("/application-extractions?status=application_extracted");
+  list.innerHTML = rows.map((row) => applicationCard(row, true)).join("");
+  list.querySelectorAll("[data-accept]").forEach((button) => {
+    button.addEventListener("click", () => submitReview(button.dataset.accept, "accepted").catch(alert));
+  });
+  list.querySelectorAll("[data-reject]").forEach((button) => {
+    button.addEventListener("click", () => submitReview(button.dataset.reject, "rejected").catch(alert));
+  });
+}
+
+function setupExport() {
+  $("#export-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const form = new FormData(event.currentTarget);
+      const result = await postExport(form.get("output"));
+      alert(`Exported ${result.row_count} row(s)`);
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+  $("#label-export-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const form = new FormData(event.currentTarget);
+      const result = await postExport(form.get("output"));
+      const skipped = result.qc_skipped_count || 0;
+      alert(`Prepared ${result.row_count} label(s). QC skipped ${skipped} contact(s).`);
+      window.location.href = `/exports/${result.id}/download`;
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+}
+
+async function postExport(output) {
+  return getJson("/exports", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({output, status: "accepted"}),
+  });
+}
+
+if (page === "run") setupRunPage();
+if (page === "agenda") {
+  loadAgenda().catch(console.error);
+  $("#agenda-status")?.addEventListener("change", () => loadAgenda().catch(console.error));
+}
+if (page === "applications") {
+  loadApplications().catch(console.error);
+  $("#application-status")?.addEventListener("change", () => loadApplications().catch(console.error));
+}
+if (page === "review") {
+  loadReview().catch(console.error);
+  setupExport();
+}

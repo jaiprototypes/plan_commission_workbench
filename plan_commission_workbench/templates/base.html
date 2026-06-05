@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Plan Commission Workbench</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+  </head>
+  <body data-page="{{ page }}">
+    <header class="topbar">
+      <a class="brand" href="/">Plan Commission Workbench</a>
+      <nav class="nav">
+        <a href="/" class="{{ 'active' if page == 'run' else '' }}">Run</a>
+        <a href="/agenda" class="{{ 'active' if page == 'agenda' else '' }}">Agenda</a>
+        <a href="/applications" class="{{ 'active' if page == 'applications' else '' }}">Applications</a>
+        <a href="/review" class="{{ 'active' if page == 'review' else '' }}">Review</a>
+      </nav>
+    </header>
+    <main class="shell">
+      {% block content %}{% endblock %}
+    </main>
+    <script src="{{ url_for('static', path='/app.js') }}"></script>
+  </body>
+</html>
