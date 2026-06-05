@@ -50,6 +50,7 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --collect-all "docling" `
     --collect-all "docling_core" `
     --collect-all "openai" `
+    --hidden-import "plan_commission_workbench.server" `
     --hidden-import "uvicorn.logging" `
     --hidden-import "uvicorn.loops.auto" `
     --hidden-import "uvicorn.protocols.http.auto" `

@@ -76,11 +76,13 @@ ends. Durable state is the SQLite data plus reviewed exports.
 
 ## Windows Desktop Build
 
-The Windows launcher starts the local FastAPI server, opens the browser to
-`http://127.0.0.1:8010/`, and stores runtime data under
+The Windows launcher starts the local FastAPI server, opens the browser only
+after `/health` responds at `http://127.0.0.1:8010/`, and stores runtime data under
 `%LOCALAPPDATA%\PlanCommissionWorkbench\data`. It prompts for a credited OpenAI
 API key when the key is missing. The key is used only for that desktop session
 and is not embedded in the executable, committed to git, or written to disk.
+Packaged startup logs are written to `server.log` and `server.err.log` in that
+same data folder so server failures can be diagnosed without an IDE.
 
 Build locally on Windows:
 
