@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from .settings import OpenAIKeyManager
+from plan_commission_workbench.settings import OpenAIKeyManager
 
 HOST = "127.0.0.1"
 PORT = 8010
