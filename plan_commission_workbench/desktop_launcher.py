@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -20,6 +21,7 @@ PORT = 8010
 APP_NAME = "Plan Commission Workbench"
 READY_ATTEMPTS = 100
 READY_DELAY_MS = 250
+SMOKE_TEST_TEXT = "Plan Commission Workbench Docling Smoke Test"
 
 
 def default_data_dir() -> Path:
@@ -68,6 +70,48 @@ def recent_error_summary(error_path: Path, line_count: int = 16) -> str:
         return ""
     lines = error_path.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-line_count:])
+
+
+def smoke_test_pdf_bytes() -> bytes:
+    """Purpose: create a tiny valid PDF for packaged Docling verification."""
+
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+    stream = f"BT /F1 24 Tf 72 720 Td ({SMOKE_TEST_TEXT}) Tj ET\n".encode("ascii")
+    objects.append(b"5 0 obj\n<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"endstream\nendobj\n")
+    content = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(content))
+        content.extend(obj)
+    xref_offset = len(content)
+    content.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    content.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        content.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    content.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+    return bytes(content)
+
+
+def run_docling_self_test() -> int:
+    """Purpose: fail the Windows build when bundled Docling cannot read PDFs."""
+
+    configure_desktop_environment()
+    from plan_commission_workbench.docling_adapter import DoclingTextExtractor
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        pdf_path = tmp_path / "docling_smoke_test.pdf"
+        pdf_path.write_bytes(smoke_test_pdf_bytes())
+        text = DoclingTextExtractor().extract_pdf_text(pdf_path, tmp_path / "docling")
+    if SMOKE_TEST_TEXT not in text:
+        raise RuntimeError("Docling smoke test did not extract the expected text")
+    return 0
 
 
 class DesktopLauncher:
@@ -237,6 +281,8 @@ class DesktopLauncher:
 def main() -> None:
     """Purpose: executable entry point for PyInstaller and local smoke tests."""
 
+    if "--self-test-docling" in sys.argv:
+        raise SystemExit(run_docling_self_test())
     DesktopLauncher().run()
 
 

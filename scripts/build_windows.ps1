@@ -49,6 +49,10 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --add-data "plan_commission_workbench\static;plan_commission_workbench\static" `
     --collect-all "docling" `
     --collect-all "docling_core" `
+    --collect-all "docling_parse" `
+    --collect-all "pypdfium2" `
+    --collect-all "pypdfium2_raw" `
+    --collect-all "rapidocr" `
     --collect-all "openai" `
     --hidden-import "plan_commission_workbench.server" `
     --hidden-import "uvicorn.logging" `
@@ -61,6 +65,8 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 if (-not (Test-Path $ExePath)) {
     throw "Expected executable was not created: $ExePath"
 }
+
+& $ExePath --self-test-docling
 
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path $ExePath, (Join-Path $Root "README.md") -DestinationPath $ZipPath
