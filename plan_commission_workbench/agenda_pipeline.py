@@ -52,8 +52,10 @@ class AgendaPipeline:
         try:
             downloaded = self.legistar.download_file(event.agenda_url, pdf_path)
         except DownloadError as exc:
+            self.store.log_event(run_id, statuses.FAILED_AGENDA_DOCLING, "legistar", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_AGENDA_DOCLING, str(exc)) from exc
         try:
+            self.store.log_event(run_id, "agenda_downloaded", "legistar", identity, f"Downloaded agenda PDF: {downloaded.summary()}")
             if self.store.agenda_complete(event.event_id, content_hash=downloaded.content_hash):
                 self.store.log_event(run_id, "agenda_skip", "agenda", identity, "Agenda already classified by content hash")
                 return

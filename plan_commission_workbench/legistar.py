@@ -20,6 +20,8 @@ from .models import AttachmentRecord, DownloadedFile, EventRecord
 LOG = logging.getLogger(__name__)
 BASE_URL = "https://webapi.legistar.com/v1/{tenant}"
 TIMEOUT_SECONDS = 30
+PDF_PREFIX = b"%PDF-"
+PDF_EOF = b"%%EOF"
 
 EXCLUDE_ATTACHMENT_KEYS = (
     "letter of intent",
@@ -114,18 +116,37 @@ class LegistarClient:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
+        byte_count = 0
+        content_type: str | None = None
+        content_length: int | None = None
         try:
             with self.session.get(url, stream=True, timeout=TIMEOUT_SECONDS) as response:
                 response.raise_for_status()
+                content_type = response.headers.get("Content-Type")
+                content_length = self._content_length(response.headers.get("Content-Length"))
                 with destination.open("wb") as fh:
                     for chunk in response.iter_content(chunk_size=1024 * 128):
                         if not chunk:
                             continue
+                        byte_count += len(chunk)
                         digest.update(chunk)
                         fh.write(chunk)
         except Exception as exc:
             raise DownloadError(f"Failed to download {url}: {exc}") from exc
-        return DownloadedFile(path=destination, content_hash=digest.hexdigest())
+        try:
+            first_bytes = self._validate_download(url, destination, byte_count, content_type, content_length)
+        except DownloadError:
+            raise
+        except Exception as exc:
+            raise DownloadError(f"Failed to verify downloaded file {destination.name} from {url}: {exc}") from exc
+        return DownloadedFile(
+            path=destination,
+            content_hash=digest.hexdigest(),
+            byte_count=byte_count,
+            content_type=content_type,
+            content_length=content_length,
+            first_bytes=first_bytes,
+        )
 
     def _event_from_json(self, raw: dict[str, Any]) -> EventRecord | None:
         """Purpose: normalize one Legistar event payload."""
@@ -172,6 +193,72 @@ class LegistarClient:
         response = self.session.get(url, params=params, timeout=TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.json()
+
+    def _validate_download(
+        self,
+        url: str,
+        destination: Path,
+        byte_count: int,
+        content_type: str | None,
+        content_length: int | None,
+    ) -> bytes:
+        """Purpose: fail before Docling when Legistar did not yield a real PDF."""
+
+        first_bytes, tail = self._read_download_edges(destination)
+        if content_length is not None and byte_count != content_length:
+            raise DownloadError(
+                "Downloaded file is truncated: "
+                f"{destination.name} from {url} wrote {byte_count} bytes but expected {content_length}"
+            )
+        if destination.suffix.lower() == ".pdf":
+            self._validate_pdf_bytes(url, destination, byte_count, content_type, content_length, first_bytes, tail)
+        return first_bytes
+
+    def _validate_pdf_bytes(
+        self,
+        url: str,
+        destination: Path,
+        byte_count: int,
+        content_type: str | None,
+        content_length: int | None,
+        first_bytes: bytes,
+        tail: bytes,
+    ) -> None:
+        """Purpose: catch HTML/error pages and partial PDFs before Docling."""
+
+        if byte_count < 32 or not first_bytes.startswith(PDF_PREFIX) or PDF_EOF not in tail:
+            raise DownloadError(
+                "Downloaded file is not a valid PDF: "
+                f"name={destination.name}, url={url}, bytes={byte_count}, "
+                f"content_type={content_type or 'unknown'}, "
+                f"content_length={content_length if content_length is not None else 'unknown'}, "
+                f"first_bytes={first_bytes.hex()}, text_prefix={self._text_prefix(first_bytes)}"
+            )
+
+    def _read_download_edges(self, path: Path) -> tuple[bytes, bytes]:
+        """Purpose: inspect bytes after they have been flushed to disk."""
+
+        with path.open("rb") as fh:
+            first_bytes = fh.read(32)
+            if fh.seekable():
+                fh.seek(max(path.stat().st_size - 4096, 0))
+            tail = fh.read()
+        return first_bytes, tail
+
+    def _content_length(self, raw: str | None) -> int | None:
+        """Purpose: parse optional HTTP content length safely."""
+
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    def _text_prefix(self, data: bytes) -> str:
+        """Purpose: make invalid download prefixes readable in logs."""
+
+        return data.decode("latin-1", errors="replace").replace("\n", "\\n").replace("\r", "\\r")
 
     def _match_event_item(self, agenda_item: dict[str, Any], event_items: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Purpose: match stored agenda IDs to Legistar event-item metadata."""

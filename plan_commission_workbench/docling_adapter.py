@@ -25,7 +25,7 @@ class DoclingTextExtractor:
             result = converter.convert(str(pdf_path))
             text = self._result_text(result)
         except Exception as exc:
-            raise DoclingExtractionError(f"Docling failed for {pdf_path.name}: {exc}") from exc
+            raise DoclingExtractionError(f"Docling failed for {pdf_path.name}: {exc}; {self._file_context(pdf_path)}") from exc
         if not text.strip():
             raise DoclingExtractionError(f"Docling returned empty text for {pdf_path.name}")
         sidecar = output_dir / f"{pdf_path.name}.docling.txt"
@@ -54,3 +54,14 @@ class DoclingTextExtractor:
                 if value:
                     return str(value)
         return str(document or "")
+
+    def _file_context(self, pdf_path: Path) -> str:
+        """Purpose: include disk evidence when Docling rejects an input file."""
+
+        try:
+            stat = pdf_path.stat()
+            with pdf_path.open("rb") as fh:
+                first_bytes = fh.read(32)
+            return f"file_bytes={stat.st_size}, first_bytes={first_bytes.hex()}"
+        except Exception as exc:
+            return f"file_context_unavailable={exc}"

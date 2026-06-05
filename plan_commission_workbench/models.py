@@ -99,6 +99,21 @@ class DownloadedFile:
 
     path: Path
     content_hash: str
+    byte_count: int = 0
+    content_type: str | None = None
+    content_length: int | None = None
+    first_bytes: bytes = b""
+
+    def summary(self) -> str:
+        """Purpose: format download diagnostics for operator run logs."""
+
+        content_type = self.content_type or "unknown"
+        expected = self.content_length if self.content_length is not None else "unknown"
+        return (
+            f"{self.byte_count} bytes, content_type={content_type}, "
+            f"content_length={expected}, sha256={self.content_hash}, "
+            f"first_bytes={self.first_bytes.hex()}"
+        )
 
 
 @dataclass(frozen=True)

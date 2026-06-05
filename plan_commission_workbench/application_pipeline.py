@@ -72,7 +72,9 @@ class ApplicationPipeline:
         try:
             downloaded = self.legistar.download_file(attachment.source_url, pdf_path)
         except DownloadError as exc:
+            self.store.log_event(run_id, statuses.FAILED_APPLICATION_DOWNLOAD, "legistar", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOWNLOAD, str(exc)) from exc
+        self.store.log_event(run_id, "application_downloaded", "legistar", identity, f"Downloaded application PDF: {downloaded.summary()}")
         source_id = self.store.upsert_source_item(
             run_id=run_id,
             source_kind="application",
