@@ -55,18 +55,49 @@ class PlanCommissionWorkbench:
         try:
             agenda = AgendaPipeline(self.store, self.legistar, self.docling, self.llm)
             applications = ApplicationPipeline(self.store, self.legistar, self.docling, self.llm)
+            if not self._execute_agenda_stage(run_id, request, run_tmp, agenda):
+                return self.store.get_run(run_id)
+            self._execute_application_stage(run_id, request, run_tmp, applications)
+        finally:
+            self.runtime.cleanup_run_tmp(run_id)
+        return self.store.get_run(run_id)
+
+    def _execute_agenda_stage(
+        self,
+        run_id: int,
+        request: RunRequest,
+        run_tmp: Path,
+        agenda: AgendaPipeline,
+    ) -> bool:
+        """Purpose: run agenda work and classify unexpected failures accurately."""
+
+        try:
             agenda.process_range(run_id, request, run_tmp)
+            return True
+        except WorkbenchStop as exc:
+            self.store.fail_run_from_exception(run_id, exc.status, exc)
+        except Exception as exc:  # Defensive catch for unexpected agenda failures.
+            self.store.fail_run_from_exception(run_id, statuses.FAILED_AGENDA_LLM, exc)
+        return False
+
+    def _execute_application_stage(
+        self,
+        run_id: int,
+        request: RunRequest,
+        run_tmp: Path,
+        applications: ApplicationPipeline,
+    ) -> None:
+        """Purpose: run application work and classify unexpected failures accurately."""
+
+        try:
             applications.process_hits(run_id, request, run_tmp)
             self.store.update_counters(run_id)
             self.store.finish_run(run_id, statuses.COMPLETED)
             self.store.log_event(run_id, "completed", "runner", None, "Run completed")
         except WorkbenchStop as exc:
             self.store.fail_run_from_exception(run_id, exc.status, exc)
-        except Exception as exc:  # Defensive catch for API background tasks.
-            self.store.fail_run_from_exception(run_id, statuses.FAILED_AGENDA_LLM, exc)
-        finally:
-            self.runtime.cleanup_run_tmp(run_id)
-        return self.store.get_run(run_id)
+        except Exception as exc:  # Defensive catch for unexpected application failures.
+            self.store.fail_run_from_exception(run_id, statuses.FAILED_APPLICATION_LLM, exc)
 
     def run_madison_range(
         self,

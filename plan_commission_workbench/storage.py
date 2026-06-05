@@ -41,13 +41,28 @@ class ReviewStore:
             self._ensure_columns(conn)
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
-        """Purpose: apply small forward-compatible SQLite column migrations."""
+        """Purpose: apply small forward-compatible SQLite migrations."""
 
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(application_extractions)").fetchall()}
         if "target_project" not in columns:
             conn.execute("ALTER TABLE application_extractions ADD COLUMN target_project INTEGER")
         if "target_reason" not in columns:
             conn.execute("ALTER TABLE application_extractions ADD COLUMN target_reason TEXT")
+        conn.execute("DROP INDEX IF EXISTS uq_source_items_kind_hash")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_agenda_hash
+            ON source_items(source_kind, content_hash)
+            WHERE source_kind = 'agenda' AND content_hash IS NOT NULL AND content_hash != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_items_application_hash
+            ON source_items(source_kind, content_hash)
+            WHERE source_kind = 'application' AND content_hash IS NOT NULL AND content_hash != ''
+            """
+        )
 
     @contextlib.contextmanager
     def transaction(self) -> Iterable[sqlite3.Connection]:
@@ -204,7 +219,7 @@ class ReviewStore:
                 ).fetchone()
                 if row:
                     return dict(row)
-            if content_hash:
+            if content_hash and source_kind != "application":
                 row = conn.execute(
                     "SELECT * FROM source_items WHERE source_kind = ? AND content_hash = ?",
                     (source_kind, content_hash),
@@ -637,9 +652,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_kind_url
 ON source_items(source_kind, source_url)
 WHERE source_url IS NOT NULL AND source_url != '';
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_kind_hash
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_agenda_hash
 ON source_items(source_kind, content_hash)
-WHERE content_hash IS NOT NULL AND content_hash != '';
+WHERE source_kind = 'agenda' AND content_hash IS NOT NULL AND content_hash != '';
+
+CREATE INDEX IF NOT EXISTS idx_source_items_application_hash
+ON source_items(source_kind, content_hash)
+WHERE source_kind = 'application' AND content_hash IS NOT NULL AND content_hash != '';
 
 CREATE TABLE IF NOT EXISTS agenda_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

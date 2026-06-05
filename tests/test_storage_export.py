@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 from pathlib import Path
 
 from plan_commission_workbench import statuses
@@ -161,6 +162,154 @@ def test_data_relative_export_path_uses_runtime_data_dir(tmp_path) -> None:
     path = workbench._export_path(Path("data/exports/madison_review.xlsx"))
 
     assert path == tmp_path / "user-data" / "exports" / "madison_review.xlsx"
+
+
+def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    first = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="1",
+        file_id="100",
+        attachment_id="a",
+        source_url="https://example.test/application-a.pdf",
+        content_hash="same-application-hash",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    second = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="2",
+        file_id="200",
+        attachment_id="b",
+        source_url="https://example.test/application-b.pdf",
+        content_hash=None,
+        processing_status=statuses.APPLICATION_DOWNLOADING,
+    )
+
+    updated = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="2",
+        file_id="200",
+        attachment_id="b",
+        source_url="https://example.test/application-b.pdf",
+        content_hash="same-application-hash",
+        processing_status=statuses.APPLICATION_DOCLING,
+    )
+
+    assert first != second
+    assert updated == second
+    with sqlite3.connect(store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, source_url FROM source_items WHERE source_kind = 'application' AND content_hash = ? ORDER BY id",
+            ("same-application-hash",),
+        ).fetchall()
+    assert [row[0] for row in rows] == [first, second]
+
+
+def test_label_export_keeps_newest_duplicate_contact_and_older_new_contact(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 2, 28), None)
+    older_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 10),
+        city_item_id="1001",
+        applicant=ContactFields(
+            name="Shared Contact",
+            company="Shared Housing LLC",
+            mailing_address="123 Main Street, Madison, Wisconsin",
+        ),
+        project_contact=ContactFields(
+            name="Useful Older Contact",
+            company="Useful Development LLC",
+            mailing_address="456 State Street, Madison, Wisconsin",
+        ),
+    )
+    newer_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 2, 10),
+        city_item_id="1002",
+        applicant=ContactFields(
+            name="Shared Contact",
+            company="Shared Housing LLC",
+            mailing_address="123 Main Street, Madison, Wisconsin",
+        ),
+        project_contact=ContactFields(),
+    )
+
+    result = ExportService(store).export(tmp_path / "labels.docx", statuses.ACCEPTED)
+    body = _docx_text(tmp_path / "labels.docx")
+
+    assert result["row_count"] == 2
+    assert body.count("Shared Contact") == 1
+    assert "Useful Older Contact" in body
+    assert any(
+        issue["extraction_id"] == older_id and "outdated duplicate" in issue["reason"]
+        for issue in result["qc_issues"]
+    )
+    assert not any(issue["extraction_id"] == newer_id and "outdated duplicate" in issue["reason"] for issue in result["qc_issues"])
+
+
+def _accepted_extraction(
+    store: ReviewStore,
+    run_id: int,
+    *,
+    meeting_date: dt.date,
+    city_item_id: str,
+    applicant: ContactFields,
+    project_contact: ContactFields,
+) -> int:
+    """Purpose: seed one accepted application row for export tests."""
+
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id=f"event-{city_item_id}",
+        file_id=None,
+        attachment_id=None,
+        source_url=f"https://example.test/agenda-{city_item_id}.pdf",
+        content_hash=f"agenda-hash-{city_item_id}",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(f"event-{city_item_id}", city_item_id, city_item_id, meeting_date, "Construct housing"),
+        AgendaClassification(city_item_id, statuses.AGENDA_HIT, 0.9, "Housing", "Construct housing"),
+    )
+    app_source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id=f"event-{city_item_id}",
+        file_id=city_item_id,
+        attachment_id=f"attachment-{city_item_id}",
+        source_url=f"https://example.test/application-{city_item_id}.pdf",
+        content_hash=f"application-hash-{city_item_id}",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source_id,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url=f"https://example.test/application-{city_item_id}.pdf",
+            attachment_id=f"attachment-{city_item_id}",
+            applicant=applicant,
+            project_contact=project_contact,
+            owner=ContactFields(),
+            section5_description="Construct housing.",
+            unit_count=10,
+            status=statuses.APPLICATION_EXTRACTED,
+        ),
+    )
+    store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
+    return extraction_id
 
 
 def _docx_text(path) -> str:

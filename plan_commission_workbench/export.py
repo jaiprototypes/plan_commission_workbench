@@ -132,7 +132,7 @@ class ExportService:
         contacts: list[LabelContact] = []
         issues: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for row in rows:
+        for row in self._newest_rows_first(rows):
             for prefix in LABEL_PREFIXES:
                 contact, reason = self._label_contact(row, prefix)
                 if not contact:
@@ -140,10 +140,22 @@ class ExportService:
                         issues.append({"extraction_id": row.get("id"), "contact_type": prefix, "reason": reason})
                     continue
                 if contact.key in seen:
+                    issues.append(
+                        {
+                            "extraction_id": row.get("id"),
+                            "contact_type": prefix,
+                            "reason": "outdated duplicate contact; newer accepted contact retained",
+                        }
+                    )
                     continue
                 seen.add(contact.key)
                 contacts.append(contact)
         return contacts, issues
+
+    def _newest_rows_first(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Purpose: prefer recent accepted contact data during label dedupe."""
+
+        return sorted(rows, key=lambda row: (str(row.get("meeting_date") or ""), int(row.get("id") or 0)), reverse=True)
 
     def _label_contact(self, row: dict[str, Any], prefix: str) -> tuple[LabelContact | None, str | None]:
         """Purpose: validate one applicant/project-contact/owner mailing record."""
