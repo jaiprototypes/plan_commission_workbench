@@ -8,7 +8,7 @@ from plan_commission_workbench.server import PACKAGE_ROOT, create_app
 
 
 def test_ui_pages_render_without_template_errors() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(start_watchdog=False))
 
     for path in ("/", "/agenda", "/applications", "/review"):
         response = client.get(path)
@@ -36,7 +36,7 @@ def test_run_js_prompts_for_missing_openai_key() -> None:
 
 def test_server_can_set_openai_key_for_current_process(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    client = TestClient(create_app())
+    client = TestClient(create_app(start_watchdog=False))
 
     assert client.get("/health").json()["openai"]["api_key_present"] is False
     blocked = client.post(

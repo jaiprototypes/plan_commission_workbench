@@ -38,6 +38,8 @@ class AgendaPipeline:
         events = self.legistar.list_plan_commission_events(request.date_from, request.date_to)
         self.store.log_event(run_id, "agenda_events", "legistar", None, f"Fetched {len(events)} Plan Commission event(s)")
         for event in events:
+            if not self.store.run_is_running(run_id):
+                return
             self._process_event(run_id, event, request, run_tmp)
             self.store.update_counters(run_id)
 
@@ -49,12 +51,16 @@ class AgendaPipeline:
             self.store.log_event(run_id, "agenda_skip", "agenda", identity, "Agenda already classified by source URL")
             return
         pdf_path = run_tmp / f"agenda_{event.event_id}.pdf"
+        if not self.store.heartbeat_run(run_id, "agenda_downloading", "legistar", identity, f"Downloading agenda PDF from {event.agenda_url}"):
+            return
         try:
             downloaded = self.legistar.download_file(event.agenda_url, pdf_path)
         except DownloadError as exc:
             self.store.log_event(run_id, statuses.FAILED_AGENDA_DOCLING, "legistar", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_AGENDA_DOCLING, str(exc)) from exc
         try:
+            if not self.store.run_is_running(run_id):
+                return
             self.store.log_event(run_id, "agenda_downloaded", "legistar", identity, f"Downloaded agenda PDF: {downloaded.summary()}")
             if self.store.agenda_complete(event.event_id, content_hash=downloaded.content_hash):
                 self.store.log_event(run_id, "agenda_skip", "agenda", identity, "Agenda already classified by content hash")
@@ -87,19 +93,35 @@ class AgendaPipeline:
         identity = f"event:{event.event_id}"
         docling_dir = run_tmp / f"docling_agenda_{event.event_id}"
         try:
+            if not self.store.heartbeat_run(run_id, "agenda_docling", "docling", identity, f"Extracting {pdf_path.name} with Docling"):
+                return
             text = self.docling.extract_pdf_text(pdf_path, docling_dir)
+            if not self.store.run_is_running(run_id):
+                return
             event_items = self.legistar.fetch_event_items(event.event_id)
             segments = self.segmenter.segment(text, event_id=event.event_id, meeting_date=event.meeting_date, event_items=event_items)
             if not segments:
                 raise WorkbenchStop(statuses.FAILED_AGENDA_LLM, f"No agenda items were segmented for {identity}")
+            if not self.store.heartbeat_run(
+                run_id,
+                statuses.AGENDA_CLASSIFYING,
+                "llm",
+                identity,
+                f"Classifying {len(segments)} agenda item(s) with OpenAI",
+            ):
+                return
             classifications = self._classify_chunks(segments, request.request_text)
+            if not self.store.run_is_running(run_id):
+                return
             self._persist_classifications(run_id, source_id, segments, classifications)
             hit_count = sum(1 for item in classifications if item.classification == statuses.AGENDA_HIT)
             self.store.set_source_status(source_id, statuses.AGENDA_HIT if hit_count else statuses.NOT_TARGET_PROJECT)
             self.store.log_event(run_id, "agenda_classified", "agenda", identity, f"Classified {len(segments)} item(s), {hit_count} hit(s)")
         except DoclingExtractionError as exc:
+            self.store.log_event(run_id, statuses.FAILED_AGENDA_DOCLING, "agenda", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_AGENDA_DOCLING, str(exc)) from exc
         except LLMResponseError as exc:
+            self.store.log_event(run_id, statuses.FAILED_AGENDA_LLM, "agenda", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_AGENDA_LLM, str(exc)) from exc
         finally:
             shutil.rmtree(docling_dir, ignore_errors=True)

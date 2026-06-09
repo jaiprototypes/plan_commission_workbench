@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ class PlanCommissionWorkbench:
         """Purpose: execute one run and always clean temporary source files."""
 
         run_tmp = self.runtime.run_tmp_dir(run_id)
+        self.store.register_run_worker(run_id, os.getpid())
         try:
             agenda = AgendaPipeline(self.store, self.legistar, self.docling, self.llm)
             applications = ApplicationPipeline(self.store, self.legistar, self.docling, self.llm)
@@ -92,8 +94,8 @@ class PlanCommissionWorkbench:
         try:
             applications.process_hits(run_id, request, run_tmp)
             self.store.update_counters(run_id)
-            self.store.finish_run(run_id, statuses.COMPLETED)
-            self.store.log_event(run_id, "completed", "runner", None, "Run completed")
+            if self.store.finish_run(run_id, statuses.COMPLETED):
+                self.store.log_event(run_id, "completed", "runner", None, "Run completed")
         except WorkbenchStop as exc:
             self.store.fail_run_from_exception(run_id, exc.status, exc)
         except Exception as exc:  # Defensive catch for unexpected application failures.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import json
+import os
 import sqlite3
 import traceback
 from pathlib import Path
@@ -18,6 +19,30 @@ def _now() -> str:
     """Purpose: produce compact UTC timestamps for SQLite rows."""
 
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: str | None) -> dt.datetime | None:
+    """Purpose: parse stored UTC timestamps for watchdog age checks."""
+
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(dt.UTC)
+
+
+def _pid_alive(pid: int | None) -> bool | None:
+    """Purpose: check whether a recorded worker process still exists."""
+
+    if not pid:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -43,11 +68,20 @@ class ReviewStore:
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         """Purpose: apply small forward-compatible SQLite migrations."""
 
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(application_extractions)").fetchall()}
-        if "target_project" not in columns:
+        app_columns = self._table_columns(conn, "application_extractions")
+        if "target_project" not in app_columns:
             conn.execute("ALTER TABLE application_extractions ADD COLUMN target_project INTEGER")
-        if "target_reason" not in columns:
+        if "target_reason" not in app_columns:
             conn.execute("ALTER TABLE application_extractions ADD COLUMN target_reason TEXT")
+        run_columns = self._table_columns(conn, "runs")
+        if "worker_pid" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN worker_pid INTEGER")
+        if "heartbeat_at" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN heartbeat_at TEXT")
+        if "heartbeat_stage" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN heartbeat_stage TEXT")
+        if "heartbeat_source" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN heartbeat_source TEXT")
         conn.execute("DROP INDEX IF EXISTS uq_source_items_kind_hash")
         conn.execute(
             """
@@ -63,6 +97,11 @@ class ReviewStore:
             WHERE source_kind = 'application' AND content_hash IS NOT NULL AND content_hash != ''
             """
         )
+
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        """Purpose: read SQLite table columns for tiny migrations."""
+
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
     @contextlib.contextmanager
     def transaction(self) -> Iterable[sqlite3.Connection]:
@@ -93,14 +132,163 @@ class ReviewStore:
             )
             return int(cur.lastrowid)
 
-    def finish_run(self, run_id: int, status: str = statuses.COMPLETED, last_error: str | None = None) -> None:
+    def finish_run(
+        self,
+        run_id: int,
+        status: str = statuses.COMPLETED,
+        last_error: str | None = None,
+        *,
+        only_if_running: bool = True,
+    ) -> bool:
         """Purpose: close a run with its final status."""
 
         with self.transaction() as conn:
+            query = "UPDATE runs SET status = ?, last_error = ?, finished_at = ? WHERE id = ?"
+            params: tuple[Any, ...] = (status, last_error, _now(), run_id)
+            if only_if_running:
+                query += " AND status = ?"
+                params = (*params, statuses.RUNNING)
+            cur = conn.execute(query, params)
+            return bool(cur.rowcount)
+
+    def register_run_worker(self, run_id: int, worker_pid: int) -> None:
+        """Purpose: record the process responsible for a background scrape."""
+
+        stamp = _now()
+        with self.transaction() as conn:
             conn.execute(
-                "UPDATE runs SET status = ?, last_error = ?, finished_at = ? WHERE id = ?",
-                (status, last_error, _now(), run_id),
+                """
+                UPDATE runs
+                SET worker_pid = ?, heartbeat_at = ?, heartbeat_stage = ?, heartbeat_source = NULL
+                WHERE id = ? AND status = ?
+                """,
+                (worker_pid, stamp, "worker_start", run_id, statuses.RUNNING),
             )
+            conn.execute(
+                """
+                INSERT INTO run_events
+                (run_id, stage, component, source_identity, message, traceback_summary, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, "worker_start", "runner", None, f"Worker PID {worker_pid} started run", None, stamp),
+            )
+
+    def heartbeat_run(
+        self,
+        run_id: int,
+        stage: str,
+        component: str,
+        source_identity: str | None,
+        message: str,
+    ) -> bool:
+        """Purpose: mark a live run's current long-running stage."""
+
+        stamp = _now()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """
+                UPDATE runs
+                SET heartbeat_at = ?, heartbeat_stage = ?, heartbeat_source = ?
+                WHERE id = ? AND status = ?
+                """,
+                (stamp, stage, source_identity, run_id, statuses.RUNNING),
+            )
+            if not cur.rowcount:
+                return False
+            conn.execute(
+                """
+                INSERT INTO run_events
+                (run_id, stage, component, source_identity, message, traceback_summary, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, stage, component, source_identity, message, None, stamp),
+            )
+            return True
+
+    def run_is_running(self, run_id: int) -> bool:
+        """Purpose: let workers stop writing after watchdog failure."""
+
+        with self.transaction() as conn:
+            row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+            return bool(row and row["status"] == statuses.RUNNING)
+
+    def mark_stale_running_runs(self, stale_after_seconds: int) -> list[dict[str, Any]]:
+        """Purpose: fail running rows whose worker died or stopped heartbeating."""
+
+        now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+        marked: list[dict[str, Any]] = []
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT * FROM runs WHERE status = ?", (statuses.RUNNING,)).fetchall()
+            for row in rows:
+                result = self._stale_result(dict(row), now, stale_after_seconds)
+                if not result:
+                    continue
+                status = self._failure_status_for_stage(row["heartbeat_stage"])
+                message = self._stale_message(row, result, stale_after_seconds)
+                stamp = now.isoformat().replace("+00:00", "Z")
+                cur = conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = ?, last_error = ?, finished_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (status, message, stamp, row["id"], statuses.RUNNING),
+                )
+                if not cur.rowcount:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO run_events
+                    (run_id, stage, component, source_identity, message, traceback_summary, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (row["id"], status, "watchdog", row["heartbeat_source"], message, None, stamp),
+                )
+                marked.append({"run_id": row["id"], "status": status, "message": message})
+        return marked
+
+    def _stale_result(self, row: dict[str, Any], now: dt.datetime, stale_after_seconds: int) -> dict[str, Any] | None:
+        """Purpose: decide whether a running row is stale or dead."""
+
+        pid_alive = _pid_alive(row.get("worker_pid"))
+        last_seen = _parse_timestamp(row.get("heartbeat_at") or row.get("started_at") or row.get("created_at"))
+        age_seconds = int((now - last_seen).total_seconds()) if last_seen else stale_after_seconds + 1
+        if pid_alive is False:
+            return {"reason": "worker process is no longer alive", "age_seconds": age_seconds, "pid_alive": pid_alive}
+        if age_seconds >= stale_after_seconds:
+            return {"reason": "heartbeat timed out", "age_seconds": age_seconds, "pid_alive": pid_alive}
+        return None
+
+    def _failure_status_for_stage(self, stage: str | None) -> str:
+        """Purpose: map a stale heartbeat to the most useful run failure."""
+
+        value = stage or ""
+        if value == statuses.APPLICATION_DOWNLOADING:
+            return statuses.FAILED_APPLICATION_DOWNLOAD
+        if value == statuses.APPLICATION_DOCLING:
+            return statuses.FAILED_APPLICATION_DOCLING
+        if value == statuses.APPLICATION_LLM_EXTRACTING:
+            return statuses.FAILED_APPLICATION_LLM
+        if value == statuses.AGENDA_CLASSIFYING:
+            return statuses.FAILED_AGENDA_LLM
+        if value == "agenda_downloading":
+            return statuses.FAILED_AGENDA_DOCLING
+        if value == "agenda_docling":
+            return statuses.FAILED_AGENDA_DOCLING
+        if value.startswith("application"):
+            return statuses.FAILED_APPLICATION_LLM
+        return statuses.FAILED_AGENDA_LLM
+
+    def _stale_message(self, row: sqlite3.Row, result: dict[str, Any], stale_after_seconds: int) -> str:
+        """Purpose: create an operator-readable watchdog failure."""
+
+        return (
+            "Run watchdog stopped stale processing: "
+            f"{result['reason']}; stage={row['heartbeat_stage'] or 'unknown'}; "
+            f"source={row['heartbeat_source'] or 'unknown'}; worker_pid={row['worker_pid'] or 'unknown'}; "
+            f"pid_alive={result['pid_alive']}; heartbeat_age_seconds={result['age_seconds']}; "
+            f"limit_seconds={stale_after_seconds}"
+        )
 
     def update_counters(self, run_id: int) -> None:
         """Purpose: refresh counters for the run's requested date range."""
@@ -630,7 +818,11 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    worker_pid INTEGER,
+    heartbeat_at TEXT,
+    heartbeat_stage TEXT,
+    heartbeat_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS source_items (

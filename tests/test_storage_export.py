@@ -16,6 +16,7 @@ from plan_commission_workbench.models import (
 )
 from plan_commission_workbench.storage import ReviewStore
 from plan_commission_workbench.runtime import WorkbenchRuntime
+from plan_commission_workbench.watchdog import RunWatchdog
 
 
 def test_store_dedupe_review_and_export(tmp_path) -> None:
@@ -208,6 +209,31 @@ def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
             ("same-application-hash",),
         ).fetchall()
     assert [row[0] for row in rows] == [first, second]
+
+
+def test_watchdog_marks_stale_application_docling_run_and_preserves_failure(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+
+    assert store.heartbeat_run(
+        run_id,
+        statuses.APPLICATION_DOCLING,
+        "docling",
+        "agenda_item:240",
+        "Extracting application_240_123.pdf with Docling",
+    )
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET heartbeat_at = ? WHERE id = ?", ("2026-01-01T00:00:00Z", run_id))
+
+    marked = RunWatchdog(store, stale_after_seconds=1).audit_once()
+    row = store.get_run(run_id)
+    late_completion = store.finish_run(run_id, statuses.COMPLETED)
+
+    assert marked[0]["status"] == statuses.FAILED_APPLICATION_DOCLING
+    assert row["status"] == statuses.FAILED_APPLICATION_DOCLING
+    assert "heartbeat timed out" in row["last_error"]
+    assert late_completion is False
 
 
 def test_label_export_keeps_newest_duplicate_contact_and_older_new_contact(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from . import statuses
 from .api import PlanCommissionWorkbench
 from .models import RunRequest
+from .watchdog import RunWatchdog
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -40,11 +42,25 @@ class OpenAIKeyRequest(BaseModel):
     api_key: str
 
 
-def create_app() -> FastAPI:
+def create_app(start_watchdog: bool = True) -> FastAPI:
     """Purpose: expose the standalone workbench through API and UI."""
 
-    app = FastAPI(title="Plan Commission Workbench")
     workbench = PlanCommissionWorkbench()
+    watchdog = RunWatchdog(workbench.store) if start_watchdog else None
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """Purpose: run stale-run monitoring for the server lifetime."""
+
+        if watchdog:
+            watchdog.start()
+        try:
+            yield
+        finally:
+            if watchdog:
+                watchdog.stop()
+
+    app = FastAPI(title="Plan Commission Workbench", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(PACKAGE_ROOT / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)

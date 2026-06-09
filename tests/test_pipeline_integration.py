@@ -191,6 +191,9 @@ def test_full_mocked_run_creates_hit_and_application_then_skips_completed_work(t
     assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1
     assert docling.calls == 2
     assert not (tmp_path / "data" / "tmp" / "run_1").exists()
+    event_stages = [event["stage"] for event in workbench.store.list_run_events(1)]
+    assert statuses.APPLICATION_DOCLING in event_stages
+    assert statuses.APPLICATION_LLM_EXTRACTING in event_stages
 
     extraction = workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)[0]
     workbench.store.review_application(extraction["id"], statuses.ACCEPTED, {}, None)

@@ -39,6 +39,8 @@ class ApplicationPipeline:
         hits = self.store.list_agenda_hits_for_dates(request.date_from, request.date_to)
         self.store.log_event(run_id, "application_queue", "application", None, f"Found {len(hits)} agenda hit(s)")
         for agenda_item in hits:
+            if not self.store.run_is_running(run_id):
+                return
             self._process_hit(run_id, agenda_item, run_tmp)
             self.store.update_counters(run_id)
 
@@ -69,11 +71,22 @@ class ApplicationPipeline:
         )
         pdf_path = run_tmp / f"application_{attachment.city_item_id}_{attachment.attachment_id}.pdf"
         self.store.set_source_status(source_id, statuses.APPLICATION_DOWNLOADING)
+        if not self.store.heartbeat_run(
+            run_id,
+            statuses.APPLICATION_DOWNLOADING,
+            "legistar",
+            identity,
+            f"Downloading application PDF attachment {attachment.attachment_id}",
+        ):
+            return
         try:
             downloaded = self.legistar.download_file(attachment.source_url, pdf_path)
         except DownloadError as exc:
             self.store.log_event(run_id, statuses.FAILED_APPLICATION_DOWNLOAD, "legistar", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOWNLOAD, str(exc)) from exc
+        if not self.store.run_is_running(run_id):
+            downloaded.path.unlink(missing_ok=True)
+            return
         self.store.log_event(run_id, "application_downloaded", "legistar", identity, f"Downloaded application PDF: {downloaded.summary()}")
         source_id = self.store.upsert_source_item(
             run_id=run_id,
@@ -95,7 +108,12 @@ class ApplicationPipeline:
 
         docling_dir = run_tmp / f"docling_application_{attachment.city_item_id}_{attachment.attachment_id}"
         try:
+            identity = f"agenda_item:{attachment.agenda_item_id}"
+            if not self.store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", identity, f"Extracting {pdf_path.name} with Docling"):
+                return
             text = self.docling.extract_pdf_text(pdf_path, docling_dir)
+            if not self.store.run_is_running(run_id):
+                return
             clipped = self.clipper.clip_sections_3_and_5(text)
             if not clipped.strip():
                 message = f"Sections 3 and 5 were not found in {pdf_path.name}"
@@ -108,12 +126,22 @@ class ApplicationPipeline:
                 )
                 raise WorkbenchStop(statuses.FAILED_APPLICATION_LLM, message)
             self.store.set_source_status(source_id, statuses.APPLICATION_LLM_EXTRACTING)
+            if not self.store.heartbeat_run(
+                run_id,
+                statuses.APPLICATION_LLM_EXTRACTING,
+                "llm",
+                identity,
+                f"Extracting Section 3/5 fields with OpenAI for attachment {attachment.attachment_id}",
+            ):
+                return
             extraction = self.llm.extract_application(
                 agenda_item_id=attachment.agenda_item_id,
                 source_url=attachment.source_url,
                 attachment_id=attachment.attachment_id,
                 clipped_text=clipped,
             )
+            if not self.store.run_is_running(run_id):
+                return
             self.store.upsert_application_extraction(run_id, source_id, extraction)
             self.store.set_source_status(source_id, statuses.APPLICATION_EXTRACTED)
             self.store.log_event(

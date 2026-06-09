@@ -15,6 +15,24 @@ JsonResponder = Callable[[str, str], dict[str, Any]]
 JSON_TEXT_CONFIG = {"format": {"type": "json_object"}}
 
 
+def _env_float(name: str, default: float) -> float:
+    """Purpose: parse numeric LLM runtime settings without crashing startup."""
+
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Purpose: parse integer LLM retry settings without crashing startup."""
+
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 class AgendaPromptBuilder:
     """Purpose: build batched agenda classification prompts."""
 
@@ -129,6 +147,8 @@ class LLMJsonClient:
     def __init__(self, model: str | None = None, responder: JsonResponder | None = None) -> None:
         self.model = model or os.getenv("PCW_OPENAI_MODEL", "gpt-4.1-mini")
         self.responder = responder
+        self.timeout_seconds = max(1.0, _env_float("PCW_OPENAI_TIMEOUT_SECONDS", 180.0))
+        self.max_retries = max(0, _env_int("PCW_OPENAI_MAX_RETRIES", 2))
         self.agenda_prompts = AgendaPromptBuilder()
         self.application_prompts = ApplicationPromptBuilder()
 
@@ -144,6 +164,8 @@ class LLMJsonClient:
             "api_key_present": bool(os.getenv("OPENAI_API_KEY")),
             "package_available": package_available,
             "model": self.model,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
         }
 
     def classify_agenda(
@@ -187,7 +209,7 @@ class LLMJsonClient:
             from openai import OpenAI
         except Exception as exc:
             raise LLMResponseError("openai package is not installed") from exc
-        client = OpenAI()
+        client = OpenAI(timeout=self.timeout_seconds, max_retries=self.max_retries)
         try:
             response = client.responses.create(
                 model=self.model,

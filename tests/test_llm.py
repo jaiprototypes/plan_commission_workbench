@@ -141,7 +141,7 @@ def test_openai_responses_call_requests_json_object(monkeypatch: pytest.MonkeyPa
         responses = FakeResponses()
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("openai.OpenAI", lambda: FakeClient())
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: FakeClient())
 
     payload = LLMJsonClient()._request_json("Return JSON.", "Return JSON.")
 
@@ -159,7 +159,7 @@ def test_openai_request_error_is_wrapped_as_llm_response_error(monkeypatch: pyte
         responses = FakeResponses()
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("openai.OpenAI", lambda: FakeClient())
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: FakeClient())
 
     with pytest.raises(LLMResponseError, match="OpenAI JSON request failed"):
         LLMJsonClient()._request_json("Return JSON.", "Return JSON.")
