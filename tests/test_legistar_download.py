@@ -90,3 +90,31 @@ def test_docling_failure_includes_file_context(tmp_path: Path) -> None:
     message = str(excinfo.value)
     assert "file_bytes=" in message
     assert "first_bytes=255044462d312e37" in message
+
+
+def test_docling_full_page_result_uses_mode_aware_factory(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "application.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n" + (b"body\n" * 12) + b"%%EOF\n")
+    modes: list[str] = []
+
+    class FakeDocument:
+        def export_to_markdown(self) -> str:
+            return "Section 3 Applicant\nSection 5 Project"
+
+    class FakeConverter:
+        def convert(self, _source: str) -> FakeDocument:
+            return FakeDocument()
+
+    def factory(mode: str) -> FakeConverter:
+        modes.append(mode)
+        return FakeConverter()
+
+    result = DoclingTextExtractor(converter_factory=factory).extract_pdf_text_result(
+        pdf_path,
+        tmp_path / "docling",
+        force_full_page_ocr=True,
+    )
+
+    assert modes == ["full_page_ocr"]
+    assert result.mode == "full_page_ocr"
+    assert result.output_path.name == "application.pdf.full_page_ocr.docling.txt"

@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-docling = ["docling>=2.0"]
+docling = ["docling[rapidocr]>=2.0"]
 test = ["pytest>=8.0"]
 build = ["pyinstaller>=6.0"]
 

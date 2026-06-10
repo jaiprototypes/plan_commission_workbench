@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 from . import statuses
-from .docling_adapter import DoclingTextExtractor
+from .docling_adapter import DoclingTextExtractor, DoclingTextResult
 from .exceptions import DoclingExtractionError, DownloadError, LLMResponseError, WorkbenchStop
 from .legistar import LegistarClient
 from .llm import LLMJsonClient
@@ -109,22 +110,19 @@ class ApplicationPipeline:
         docling_dir = run_tmp / f"docling_application_{attachment.city_item_id}_{attachment.attachment_id}"
         try:
             identity = f"agenda_item:{attachment.agenda_item_id}"
-            if not self.store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", identity, f"Extracting {pdf_path.name} with Docling"):
-                return
-            text = self.docling.extract_pdf_text(pdf_path, docling_dir)
-            if not self.store.run_is_running(run_id):
-                return
-            clipped = self.clipper.clip_sections_3_and_5(text)
+            clipped = self._extract_clipped_sections(run_id, identity, pdf_path, docling_dir)
             if not clipped.strip():
-                message = f"Sections 3 and 5 were not found in {pdf_path.name}"
+                message = f"Sections 3 and 5 were not found in {pdf_path.name} after Docling default and full-page OCR attempts"
                 self.store.log_event(
                     run_id,
-                    statuses.FAILED_APPLICATION_LLM,
+                    statuses.FAILED_APPLICATION_DOCLING,
                     "application",
-                    f"agenda_item:{attachment.agenda_item_id}",
+                    identity,
                     message,
                 )
-                raise WorkbenchStop(statuses.FAILED_APPLICATION_LLM, message)
+                raise WorkbenchStop(statuses.FAILED_APPLICATION_DOCLING, message)
+            if not self.store.run_is_running(run_id):
+                return
             self.store.set_source_status(source_id, statuses.APPLICATION_LLM_EXTRACTING)
             if not self.store.heartbeat_run(
                 run_id,
@@ -172,9 +170,102 @@ class ApplicationPipeline:
         finally:
             shutil.rmtree(docling_dir, ignore_errors=True)
 
+    def _extract_clipped_sections(self, run_id: int, identity: str, pdf_path: Path, docling_dir: Path) -> str:
+        """Purpose: retry bad application Docling output with full-page OCR."""
+
+        default_result = self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=False)
+        clipped = self._clip_and_log(run_id, identity, default_result)
+        if clipped.strip() or not self._full_page_retry_enabled():
+            return clipped
+        self.store.log_event(
+            run_id,
+            "application_docling_retry",
+            "docling",
+            identity,
+            f"Retrying {pdf_path.name} with full-page OCR because default Docling did not expose Sections 3 and 5; {self._full_page_ocr_summary()}",
+        )
+        retry_result = self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=True)
+        return self._clip_and_log(run_id, identity, retry_result)
+
+    def _extract_docling_mode(
+        self,
+        run_id: int,
+        identity: str,
+        pdf_path: Path,
+        docling_dir: Path,
+        *,
+        force_full_page_ocr: bool,
+    ) -> DoclingTextResult:
+        """Purpose: run one Docling mode with heartbeat and granular logs."""
+
+        mode = "full-page OCR" if force_full_page_ocr else "default"
+        if not self.store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", identity, f"Extracting {pdf_path.name} with Docling {mode}"):
+            raise WorkbenchStop(statuses.FAILED_APPLICATION_DOCLING, "Run stopped before Docling extraction")
+        try:
+            result = self.docling.extract_pdf_text_result(
+                pdf_path,
+                docling_dir / result_dir_name(force_full_page_ocr),
+                force_full_page_ocr=force_full_page_ocr,
+            )
+        except DoclingExtractionError as exc:
+            if not force_full_page_ocr and self._full_page_retry_enabled():
+                self.store.log_event(
+                    run_id,
+                    "application_docling_default_failed",
+                    "docling",
+                    identity,
+                    f"Default Docling failed; retrying with full-page OCR; {self._full_page_ocr_summary()}; error={exc}",
+                )
+                return self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=True)
+            raise
+        self.store.log_event(
+            run_id,
+            "application_docling_text",
+            "docling",
+            identity,
+            f"Docling {result.mode} extracted {len(result.text)} char(s); sidecar={result.output_path.name}",
+        )
+        return result
+
+    def _clip_and_log(self, run_id: int, identity: str, result: DoclingTextResult) -> str:
+        """Purpose: record whether Docling output contains target sections."""
+
+        clipped = self.clipper.clip_sections_3_and_5(result.text)
+        status = "found" if clipped.strip() else "missing"
+        self.store.log_event(
+            run_id,
+            "application_sections_clipped",
+            "application",
+            identity,
+            f"Sections 3/5 {status} from Docling {result.mode}; clipped_chars={len(clipped)}, source_chars={len(result.text)}",
+        )
+        return clipped
+
+    def _full_page_retry_enabled(self) -> bool:
+        """Purpose: allow operators to disable slower OCR retry if needed."""
+
+        return os.getenv("PCW_DOCLING_FULL_PAGE_RETRY", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+    def _full_page_ocr_summary(self) -> str:
+        """Purpose: log retry settings without requiring test doubles to inherit state."""
+
+        summary = getattr(self.docling, "full_page_ocr_summary", None)
+        if callable(summary):
+            try:
+                return str(summary())
+            except AttributeError:
+                pass
+        return "backend=unknown, images_scale=unknown"
+
     def _event_items(self, event_id: str) -> list[dict]:
         """Purpose: fetch Legistar event items once per run event."""
 
         if event_id not in self._event_items_cache:
             self._event_items_cache[event_id] = self.legistar.fetch_event_items(event_id)
         return self._event_items_cache[event_id]
+
+
+def result_dir_name(force_full_page_ocr: bool) -> str:
+    """Purpose: isolate default and full-page OCR sidecars in temp output."""
+
+    return "full_page_ocr" if force_full_page_ocr else "default"

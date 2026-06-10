@@ -98,8 +98,10 @@ class AgendaPipeline:
             text = self.docling.extract_pdf_text(pdf_path, docling_dir)
             if not self.store.run_is_running(run_id):
                 return
+            self.store.log_event(run_id, "agenda_docling_text", "docling", identity, f"Docling extracted {len(text)} char(s) from {pdf_path.name}")
             event_items = self.legistar.fetch_event_items(event.event_id)
             segments = self.segmenter.segment(text, event_id=event.event_id, meeting_date=event.meeting_date, event_items=event_items)
+            self.store.log_event(run_id, "agenda_segmented", "agenda", identity, f"Segmented {len(segments)} agenda item candidate(s)")
             if not segments:
                 raise WorkbenchStop(statuses.FAILED_AGENDA_LLM, f"No agenda items were segmented for {identity}")
             if not self.store.heartbeat_run(

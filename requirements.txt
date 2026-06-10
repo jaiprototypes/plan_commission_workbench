@@ -10,4 +10,4 @@ uvicorn>=0.30
 
 # Required for live PDF extraction. Tests mock this adapter so installation can
 # be validated before the heavier Docling dependency is added.
-docling>=2.0
+docling[rapidocr]>=2.0
