@@ -65,6 +65,14 @@ class ReviewStore:
             conn.executescript(SCHEMA_SQL)
             self._ensure_columns(conn)
 
+    def backup_to(self, destination: Path) -> Path:
+        """Purpose: create a consistent DB copy while the server may be running."""
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as source, sqlite3.connect(destination) as target:
+            source.backup(target)
+        return destination
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         """Purpose: apply small forward-compatible SQLite migrations."""
 

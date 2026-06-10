@@ -74,6 +74,12 @@ SQLite lives at `data/workbench.db`. Downloaded PDFs and Docling sidecars are
 kept only in per-run temp folders under `data/tmp/` and are removed when the run
 ends. Durable state is the SQLite data plus reviewed exports.
 
+Use the Run screen's **State Bundle** button to download a diagnostics zip with
+`workbench.db`, `server.log`, `server.err.log`, and a small manifest. Restoring
+that `workbench.db` into another machine's data folder reproduces the same
+dedupe/skip state, so overlapping test runs resume near the failing item instead
+of scraping every completed agenda and application again.
+
 ## Runtime Safeguards
 
 Long Docling conversions run in isolated child worker process groups with hard

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from pathlib import Path
+import zipfile
 
 from plan_commission_workbench import statuses
 from plan_commission_workbench.api import PlanCommissionWorkbench
@@ -163,6 +165,28 @@ def test_data_relative_export_path_uses_runtime_data_dir(tmp_path) -> None:
     path = workbench._export_path(Path("data/exports/madison_review.xlsx"))
 
     assert path == tmp_path / "user-data" / "exports" / "madison_review.xlsx"
+
+
+def test_diagnostic_bundle_contains_restorable_db_and_logs(tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+    workbench.store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), "debug")
+    runtime.server_log_path.write_text("server log", encoding="utf-8")
+    runtime.server_error_log_path.write_text("server error", encoding="utf-8")
+
+    result = workbench.create_diagnostic_bundle()
+
+    bundle_path = Path(result["path"])
+    assert bundle_path.exists()
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = set(archive.namelist())
+        assert {"workbench.db", "manifest.json", "server.log", "server.err.log"} <= names
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["latest_runs"][0]["run_request_text"] == "debug"
+        extracted_db = tmp_path / "restored.db"
+        extracted_db.write_bytes(archive.read("workbench.db"))
+    with sqlite3.connect(extracted_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 
 def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:

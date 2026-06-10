@@ -130,6 +130,7 @@ function setupRunPage() {
   loadRuns().catch(console.error);
   $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
   $("#refresh-runs")?.addEventListener("click", () => loadRuns().catch(console.error));
+  $("#download-state-bundle")?.addEventListener("click", () => downloadStateBundle().catch((error) => alert(error.message)));
   $("#run-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -148,6 +149,11 @@ function setupRunPage() {
     await loadRunEvents(run.run_id);
   });
   setInterval(() => loadRuns().catch(() => {}), 6000);
+}
+
+async function downloadStateBundle() {
+  const result = await getJson("/diagnostics/state-bundle", {method: "POST"});
+  window.location.href = result.download_url;
 }
 
 async function loadAgenda() {

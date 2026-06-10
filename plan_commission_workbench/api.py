@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 from pathlib import Path
 from typing import Any
+import zipfile
 
 from . import statuses
 from .agenda_pipeline import AgendaPipeline
@@ -131,6 +133,28 @@ class PlanCommissionWorkbench:
         path = self._export_path(output_path)
         return ExportService(self.store).export(path, status)
 
+    def create_diagnostic_bundle(self) -> dict[str, Any]:
+        """Purpose: package DB state and logs for reproducing remote scrape state."""
+
+        stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        bundle_path = self.runtime.diagnostics_dir / f"pcw_state_bundle_{stamp}.zip"
+        db_backup_path = self.runtime.tmp_dir / f"workbench_backup_{stamp}.db"
+        self.store.backup_to(db_backup_path)
+        try:
+            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(db_backup_path, "workbench.db")
+                self._write_bundle_manifest(archive, stamp)
+                self._write_bundle_log(archive, self.runtime.server_log_path, "server.log")
+                self._write_bundle_log(archive, self.runtime.server_error_log_path, "server.err.log")
+        finally:
+            db_backup_path.unlink(missing_ok=True)
+        return {
+            "filename": bundle_path.name,
+            "path": str(bundle_path),
+            "byte_count": bundle_path.stat().st_size,
+            "download_url": f"/diagnostics/state-bundles/{bundle_path.name}",
+        }
+
     def _export_path(self, output_path: Path) -> Path:
         """Purpose: keep data-relative exports outside bundled app folders."""
 
@@ -139,6 +163,23 @@ class PlanCommissionWorkbench:
         if output_path.parts and output_path.parts[0] == "data":
             return self.runtime.data_dir.joinpath(*output_path.parts[1:])
         return self.runtime.project_root / output_path
+
+    def _write_bundle_manifest(self, archive: zipfile.ZipFile, stamp: str) -> None:
+        """Purpose: include enough context to restore a debug database."""
+
+        manifest = {
+            "created_utc": stamp,
+            "data_dir": str(self.runtime.data_dir),
+            "db_path": str(self.runtime.db_path),
+            "latest_runs": self.store.list_runs(limit=10),
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2, default=str))
+
+    def _write_bundle_log(self, archive: zipfile.ZipFile, path: Path, arcname: str) -> None:
+        """Purpose: include desktop logs when they exist without failing the bundle."""
+
+        if path.exists():
+            archive.write(path, arcname)
 
     def openai_status(self) -> dict[str, Any]:
         """Purpose: expose LLM readiness without making a model call."""

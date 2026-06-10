@@ -178,6 +178,19 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
         }.get(str(row["format"]), "application/octet-stream")
         return FileResponse(path, media_type=media_type, filename=path.name)
 
+    @app.post("/diagnostics/state-bundle")
+    def create_state_bundle() -> dict[str, Any]:
+        return workbench.create_diagnostic_bundle()
+
+    @app.get("/diagnostics/state-bundles/{filename}")
+    def download_state_bundle(filename: str) -> FileResponse:
+        path = workbench.runtime.diagnostics_dir / filename
+        if filename != Path(filename).name or path.suffix.lower() != ".zip":
+            raise HTTPException(status_code=400, detail="Invalid diagnostics filename")
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Diagnostics bundle not found")
+        return FileResponse(path, media_type="application/zip", filename=path.name)
+
     return app
 
 

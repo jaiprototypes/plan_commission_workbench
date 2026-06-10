@@ -82,6 +82,13 @@ body {
   margin-bottom: 14px;
 }
 
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 h1,
 h2 {
   font-size: 20px;
@@ -332,7 +339,8 @@ th {
 
 @media (max-width: 850px) {
   .topbar,
-  .panel-head {
+  .panel-head,
+  .panel-actions {
     align-items: flex-start;
     flex-direction: column;
   }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import zipfile
 
 from fastapi.testclient import TestClient
 
@@ -32,6 +33,31 @@ def test_run_js_prompts_for_missing_openai_key() -> None:
     assert "credited OpenAI API key" in script
     assert "/settings/openai-api-key" in script
     assert "OpenAI key required" in script
+
+
+def test_run_js_can_download_state_bundle() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "downloadStateBundle" in script
+    assert "/diagnostics/state-bundle" in script
+    assert "download_url" in script
+
+
+def test_state_bundle_endpoint_returns_zip(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    client = TestClient(create_app(start_watchdog=False))
+
+    created = client.post("/diagnostics/state-bundle")
+    assert created.status_code == 200
+    payload = created.json()
+    downloaded = client.get(payload["download_url"])
+
+    assert downloaded.status_code == 200
+    zip_path = tmp_path / "state.zip"
+    zip_path.write_bytes(downloaded.content)
+    with zipfile.ZipFile(zip_path) as archive:
+        assert "workbench.db" in archive.namelist()
+        assert "manifest.json" in archive.namelist()
 
 
 def test_server_can_set_openai_key_for_current_process(monkeypatch) -> None:
