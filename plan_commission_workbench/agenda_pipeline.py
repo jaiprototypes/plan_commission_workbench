@@ -35,7 +35,27 @@ class AgendaPipeline:
     def process_range(self, run_id: int, request: RunRequest, run_tmp: Path) -> None:
         """Purpose: process all Madison events for the requested date range."""
 
-        events = self.legistar.list_plan_commission_events(request.date_from, request.date_to)
+        if not self.store.heartbeat_run(
+            run_id,
+            "agenda_events",
+            "legistar",
+            None,
+            f"Starting Madison event lookup for {request.date_from} to {request.date_to}",
+        ):
+            return
+        events = self.legistar.list_plan_commission_events(
+            request.date_from,
+            request.date_to,
+            progress_callback=lambda message: self.store.heartbeat_run(
+                run_id,
+                "agenda_events",
+                "legistar",
+                None,
+                message,
+            ),
+        )
+        if not self.store.run_is_running(run_id):
+            return
         self.store.log_event(run_id, "agenda_events", "legistar", None, f"Fetched {len(events)} Plan Commission event(s)")
         for event in events:
             if not self.store.run_is_running(run_id):
@@ -95,10 +115,27 @@ class AgendaPipeline:
         try:
             if not self.store.heartbeat_run(run_id, "agenda_docling", "docling", identity, f"Extracting {pdf_path.name} with Docling"):
                 return
-            text = self.docling.extract_pdf_text(pdf_path, docling_dir)
+            text_result = self.docling.extract_pdf_text_result(
+                pdf_path,
+                docling_dir,
+                progress_callback=lambda message: self.store.heartbeat_run(
+                    run_id,
+                    "agenda_docling",
+                    "docling",
+                    identity,
+                    message,
+                ),
+            )
+            text = text_result.text
             if not self.store.run_is_running(run_id):
                 return
-            self.store.log_event(run_id, "agenda_docling_text", "docling", identity, f"Docling extracted {len(text)} char(s) from {pdf_path.name}")
+            self.store.log_event(
+                run_id,
+                "agenda_docling_text",
+                "docling",
+                identity,
+                f"Docling {text_result.mode} extracted {len(text)} char(s) from {pdf_path.name}",
+            )
             event_items = self.legistar.fetch_event_items(event.event_id)
             segments = self.segmenter.segment(text, event_id=event.event_id, meeting_date=event.meeting_date, event_items=event_items)
             self.store.log_event(run_id, "agenda_segmented", "agenda", identity, f"Segmented {len(segments)} agenda item candidate(s)")

@@ -1,5 +1,6 @@
 const page = document.body.dataset.page;
 let openAiKeyPromptShown = false;
+let selectedRunId = null;
 
 function $(selector) {
   return document.querySelector(selector);
@@ -64,8 +65,12 @@ async function loadRuns() {
   const body = $("#runs-body");
   if (!body) return;
   const rows = await getJson("/runs");
+  if (!selectedRunId && rows[0]) selectedRunId = String(rows[0].id);
+  if (selectedRunId && !rows.some((row) => String(row.id) === selectedRunId)) {
+    selectedRunId = rows[0] ? String(rows[0].id) : null;
+  }
   body.innerHTML = rows.map((row) => `
-    <tr>
+    <tr class="${String(row.id) === selectedRunId ? "selected-row" : ""}">
       <td>${row.id}</td>
       <td>${escapeHtml(row.date_from)} to ${escapeHtml(row.date_to)}</td>
       <td class="${statusClass(row.status)}">${escapeHtml(row.status)}</td>
@@ -77,14 +82,21 @@ async function loadRuns() {
   body.querySelectorAll("[data-events]").forEach((button) => {
     button.addEventListener("click", () => loadRunEvents(button.dataset.events));
   });
-  if (rows[0]) loadRunEvents(rows[0].id);
+  if (selectedRunId) await loadRunEvents(selectedRunId);
 }
 
 async function loadRunEvents(runId) {
   const list = $("#run-events");
   const label = $("#log-run");
   if (!list || !runId) return;
-  const events = await getJson(`/runs/${runId}/events`);
+  selectedRunId = String(runId);
+  let events;
+  try {
+    events = await getJson(`/runs/${runId}/events`);
+  } catch (error) {
+    renderLogRefreshError(list, error);
+    return;
+  }
   if (label) label.textContent = `Run ${runId}`;
   list.innerHTML = events.map((event) => `
     <div class="log-line">
@@ -94,6 +106,23 @@ async function loadRunEvents(runId) {
       <br>${escapeHtml(event.message)}
     </div>
   `).join("");
+}
+
+function renderLogRefreshError(list, error) {
+  const message = error?.message || "Unable to refresh run log";
+  const html = `
+    <div class="log-line log-error" data-log-error="true">
+      <strong>${new Date().toISOString()}</strong>
+      log_refresh ui
+      <br>${escapeHtml(message)}
+    </div>
+  `;
+  const existing = list.querySelector("[data-log-error]");
+  if (existing) {
+    existing.outerHTML = html;
+    return;
+  }
+  list.insertAdjacentHTML("beforeend", html);
 }
 
 function setupRunPage() {
@@ -114,6 +143,7 @@ function setupRunPage() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(payload),
     });
+    selectedRunId = String(run.run_id);
     await loadRuns();
     await loadRunEvents(run.run_id);
   });

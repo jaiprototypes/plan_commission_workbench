@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Any, Callable
 
 from .exceptions import DoclingExtractionError
@@ -21,6 +22,9 @@ class DoclingTextResult:
     text: str
     mode: str
     output_path: Path
+
+
+ProgressCallback = Callable[[str], bool | None]
 
 
 class DoclingTextExtractor:
@@ -42,13 +46,20 @@ class DoclingTextExtractor:
         *,
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> DoclingTextResult:
         """Purpose: extract text and report whether default or OCR mode was used."""
 
         output_dir.mkdir(parents=True, exist_ok=True)
         mode = self._mode_name(force_full_page_ocr, use_vlm)
         try:
-            text = self._extract_text(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
+            text = self._extract_text(
+                pdf_path,
+                output_dir,
+                force_full_page_ocr=force_full_page_ocr,
+                use_vlm=use_vlm,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             raise DoclingExtractionError(f"Docling {mode} failed for {pdf_path.name}: {exc}; {self._file_context(pdf_path)}") from exc
         if not text.strip():
@@ -57,12 +68,26 @@ class DoclingTextExtractor:
         sidecar.write_text(text, encoding="utf-8")
         return DoclingTextResult(text=text, mode=mode, output_path=sidecar)
 
-    def _extract_text(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
+    def _extract_text(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool,
+        use_vlm: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> str:
         """Purpose: run Docling in-process for tests or subprocess for hard timeouts."""
 
         if self.converter_factory:
             return self._extract_text_inline(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
-        return self._extract_text_subprocess(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
+        return self._extract_text_subprocess(
+            pdf_path,
+            output_dir,
+            force_full_page_ocr=force_full_page_ocr,
+            use_vlm=use_vlm,
+            progress_callback=progress_callback,
+        )
 
     def _extract_text_inline(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
         """Purpose: run Docling directly when tests inject a fake converter."""
@@ -72,11 +97,21 @@ class DoclingTextExtractor:
         result = converter.convert(str(pdf_path))
         return self._result_text(result)
 
-    def _extract_text_subprocess(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
-        """Purpose: isolate Docling so a hung converter can be timed out."""
+    def _extract_text_subprocess(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool,
+        use_vlm: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> str:
+        """Purpose: isolate Docling so a hung converter can be timed out and observed."""
 
         mode = self._mode_name(force_full_page_ocr, use_vlm)
         output_json = output_dir / f"{pdf_path.name}.{mode}.worker.json"
+        stdout_log = output_dir / f"{pdf_path.name}.{mode}.worker.stdout.log"
+        stderr_log = output_dir / f"{pdf_path.name}.{mode}.worker.stderr.log"
         timeout_seconds = self._timeout_seconds(force_full_page_ocr, use_vlm)
         command = self._worker_command(pdf_path, output_json, force_full_page_ocr, use_vlm)
         env = os.environ.copy()
@@ -84,13 +119,40 @@ class DoclingTextExtractor:
         env["PCW_DOCLING_FULL_PAGE_OCR_BACKEND"] = self.full_page_ocr_backend
         env["PCW_DOCLING_IMAGES_SCALE"] = str(self._images_scale())
         env["PCW_DOCLING_VLM_PRESET"] = self._vlm_preset()
-        try:
-            completed = subprocess.run(command, capture_output=True, env=env, text=True, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds") from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
-            raise DoclingExtractionError(f"Docling {mode} worker exited {completed.returncode}: {detail}")
+        process = self._start_worker(command, env, stdout_log, stderr_log)
+        if not self._report_progress(
+            progress_callback,
+            f"Docling {mode} worker PID {process.pid} started; timeout_seconds={timeout_seconds:g}",
+        ):
+            self._kill_worker(process)
+            raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active")
+        start = time.monotonic()
+        deadline = start + timeout_seconds
+        progress_interval = self._worker_progress_interval()
+        next_progress = start + progress_interval
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                break
+            now = time.monotonic()
+            if now >= deadline:
+                self._kill_worker(process)
+                detail = self._worker_log_detail(stderr_log, stdout_log)
+                suffix = f": {detail}" if detail else ""
+                raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds{suffix}")
+            if now >= next_progress:
+                elapsed = int(now - start)
+                if not self._report_progress(
+                    progress_callback,
+                    f"Docling {mode} worker PID {process.pid} still running after {elapsed}s; timeout_seconds={timeout_seconds:g}",
+                ):
+                    self._kill_worker(process)
+                    raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active")
+                next_progress = now + progress_interval
+            time.sleep(0.5)
+        if return_code != 0:
+            detail = self._worker_log_detail(stderr_log, stdout_log)
+            raise DoclingExtractionError(f"Docling {mode} worker exited {return_code}: {detail}")
         try:
             payload = json.loads(output_json.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -99,6 +161,62 @@ class DoclingTextExtractor:
         if not isinstance(text, str):
             raise DoclingExtractionError(f"Docling {mode} worker output did not contain text")
         return text
+
+    def _start_worker(
+        self,
+        command: list[str],
+        env: dict[str, str],
+        stdout_log: Path,
+        stderr_log: Path,
+    ) -> subprocess.Popen:
+        """Purpose: launch the Docling child while keeping its raw logs on disk."""
+
+        stdout_fh = stdout_log.open("w", encoding="utf-8")
+        stderr_fh = stderr_log.open("w", encoding="utf-8")
+        try:
+            return subprocess.Popen(command, stdout=stdout_fh, stderr=stderr_fh, env=env, text=True)
+        finally:
+            stdout_fh.close()
+            stderr_fh.close()
+
+    def _kill_worker(self, process: subprocess.Popen) -> None:
+        """Purpose: stop a stuck Docling child before moving to the next fallback."""
+
+        if process.poll() is not None:
+            return
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return
+
+    def _report_progress(self, progress_callback: ProgressCallback | None, message: str) -> bool:
+        """Purpose: let callers keep DB heartbeats alive during long Docling work."""
+
+        if not progress_callback:
+            return True
+        return progress_callback(message) is not False
+
+    def _worker_progress_interval(self) -> float:
+        """Purpose: throttle visible worker pings so logs stay useful."""
+
+        try:
+            value = float(os.getenv("PCW_DOCLING_WORKER_PROGRESS_SECONDS", "30"))
+        except ValueError:
+            return 30.0
+        return max(5.0, value)
+
+    def _worker_log_detail(self, *paths: Path) -> str:
+        """Purpose: include the most useful worker stderr/stdout tail on failure."""
+
+        for path in paths:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+            except FileNotFoundError:
+                continue
+            if text:
+                return text[-1200:]
+        return "no worker output"
 
     def _worker_command(self, pdf_path: Path, output_json: Path, force_full_page_ocr: bool, use_vlm: bool) -> list[str]:
         """Purpose: invoke the Docling worker in source or frozen desktop builds."""

@@ -52,6 +52,14 @@ class ApplicationPipeline:
         if self.store.application_complete(int(agenda_item["id"])):
             self.store.log_event(run_id, "application_skip", "application", identity, "Application already extracted or accepted")
             return
+        if not self.store.heartbeat_run(
+            run_id,
+            statuses.APPLICATION_QUEUED,
+            "legistar",
+            identity,
+            f"Fetching Legistar item metadata for event {agenda_item['event_id']}",
+        ):
+            return
         event_items = self._event_items(str(agenda_item["event_id"]))
         attachment = self.legistar.find_application_attachment(agenda_item, event_items)
         if not attachment:
@@ -112,7 +120,7 @@ class ApplicationPipeline:
             identity = f"agenda_item:{attachment.agenda_item_id}"
             clipped = self._extract_clipped_sections(run_id, identity, pdf_path, docling_dir)
             if not clipped.strip():
-                message = f"Sections 3 and 5 were not found in {pdf_path.name} after Docling default and full-page OCR attempts"
+                message = f"Sections 3 and 5 were not found in {pdf_path.name} after configured Docling attempts"
                 self.store.log_event(
                     run_id,
                     statuses.FAILED_APPLICATION_DOCLING,
@@ -251,6 +259,13 @@ class ApplicationPipeline:
             docling_dir / result_dir_name(force_full_page_ocr, use_vlm),
             force_full_page_ocr=force_full_page_ocr,
             use_vlm=use_vlm,
+            progress_callback=lambda message: self.store.heartbeat_run(
+                run_id,
+                statuses.APPLICATION_DOCLING,
+                "docling",
+                identity,
+                message,
+            ),
         )
         self.store.log_event(
             run_id,

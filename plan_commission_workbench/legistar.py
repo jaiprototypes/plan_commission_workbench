@@ -7,7 +7,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin
 
 import requests
@@ -22,6 +22,7 @@ BASE_URL = "https://webapi.legistar.com/v1/{tenant}"
 TIMEOUT_SECONDS = 30
 PDF_PREFIX = b"%PDF-"
 PDF_EOF = b"%%EOF"
+ProgressCallback = Callable[[str], bool | None]
 
 EXCLUDE_ATTACHMENT_KEYS = (
     "letter of intent",
@@ -63,7 +64,12 @@ class LegistarClient:
         )
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
-    def list_plan_commission_events(self, date_from: dt.date, date_to: dt.date) -> list[EventRecord]:
+    def list_plan_commission_events(
+        self,
+        date_from: dt.date,
+        date_to: dt.date,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[EventRecord]:
         """Purpose: fetch Madison Plan Commission events inside inclusive dates."""
 
         params = {
@@ -74,9 +80,15 @@ class LegistarClient:
             ),
             "$orderby": "EventDate asc",
         }
+        self._report_progress(progress_callback, f"Fetching Madison Plan Commission events from {date_from} to {date_to}")
         payload = self._get_json(f"{self.base_url}/events", params=params)
+        raw_events = payload if isinstance(payload, list) else []
+        self._report_progress(progress_callback, f"Legistar returned {len(raw_events)} raw Plan Commission event(s)")
         events: list[EventRecord] = []
-        for raw in payload if isinstance(payload, list) else []:
+        for index, raw in enumerate(raw_events, start=1):
+            event_id = raw.get("EventId") if isinstance(raw, dict) else "unknown"
+            if not self._report_progress(progress_callback, f"Resolving agenda PDF link for event {event_id} ({index}/{len(raw_events)})"):
+                break
             event = self._event_from_json(raw)
             if event:
                 events.append(event)
@@ -193,6 +205,13 @@ class LegistarClient:
         response = self.session.get(url, params=params, timeout=TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.json()
+
+    def _report_progress(self, progress_callback: ProgressCallback | None, message: str) -> bool:
+        """Purpose: let callers write visible progress around slow Legistar calls."""
+
+        if not progress_callback:
+            return True
+        return progress_callback(message) is not False
 
     def _validate_download(
         self,

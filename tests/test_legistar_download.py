@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import subprocess
+import json
 from pathlib import Path
 
 import pytest
@@ -125,11 +125,66 @@ def test_docling_subprocess_timeout_is_reported(monkeypatch: pytest.MonkeyPatch,
     pdf_path = tmp_path / "application.pdf"
     pdf_path.write_bytes(b"%PDF-1.7\n" + (b"body\n" * 12) + b"%%EOF\n")
 
-    def fake_run(*_args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="docling-worker", timeout=kwargs["timeout"])
+    class HangingProcess:
+        """Purpose: mimic a Docling worker that never exits."""
+
+        pid = 12345
+
+        def poll(self):
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout=None) -> None:
+            return None
+
+    ticks = iter([0.0, 11.0])
 
     monkeypatch.setenv("PCW_DOCLING_TIMEOUT_SECONDS", "10")
-    monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.run", fake_run)
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", lambda *_args, **_kwargs: HangingProcess())
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.sleep", lambda _seconds: None)
 
     with pytest.raises(DoclingExtractionError, match="timed out after 10 seconds"):
         DoclingTextExtractor().extract_pdf_text_result(pdf_path, tmp_path / "docling")
+
+
+def test_docling_subprocess_reports_progress_while_worker_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "application.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n" + (b"body\n" * 12) + b"%%EOF\n")
+
+    class SlowSuccessProcess:
+        """Purpose: mimic a slow worker that eventually writes valid JSON."""
+
+        pid = 67890
+
+        def __init__(self, command, **_kwargs) -> None:
+            self.output_json = Path(command[command.index("--output-json") + 1])
+            self.poll_count = 0
+
+        def poll(self):
+            self.poll_count += 1
+            if self.poll_count >= 3:
+                self.output_json.parent.mkdir(parents=True, exist_ok=True)
+                self.output_json.write_text(json.dumps({"text": "Section 3\nSection 5"}), encoding="utf-8")
+                return 0
+            return None
+
+    ticks = iter([0.0, 6.0, 7.0])
+    messages: list[str] = []
+
+    monkeypatch.setenv("PCW_DOCLING_WORKER_PROGRESS_SECONDS", "5")
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", SlowSuccessProcess)
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.sleep", lambda _seconds: None)
+
+    result = DoclingTextExtractor().extract_pdf_text_result(
+        pdf_path,
+        tmp_path / "docling",
+        progress_callback=lambda message: messages.append(message),
+    )
+
+    assert result.text == "Section 3\nSection 5"
+    assert any("worker PID 67890 started" in message for message in messages)
+    assert any("still running after 6s" in message for message in messages)

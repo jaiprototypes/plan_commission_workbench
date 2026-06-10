@@ -26,7 +26,9 @@ class FakeLegistar:
         if include_second_event:
             self.events.append(EventRecord("28000", dt.date(2026, 6, 2), SECOND_AGENDA_URL))
 
-    def list_plan_commission_events(self, date_from, date_to):
+    def list_plan_commission_events(self, date_from, date_to, progress_callback=None):
+        if progress_callback:
+            progress_callback(f"Fake Legistar event lookup from {date_from} to {date_to}")
         return [event for event in self.events if date_from <= event.meeting_date <= date_to]
 
     def fetch_event_items(self, event_id):
@@ -114,6 +116,7 @@ class FakeDocling(DoclingTextExtractor):
         *,
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
+        progress_callback=None,
     ) -> DoclingTextResult:
         text = self.extract_pdf_text(pdf_path, output_dir)
         mode = "vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default"
@@ -122,6 +125,9 @@ class FakeDocling(DoclingTextExtractor):
 
 class FailingDocling(DoclingTextExtractor):
     def extract_pdf_text(self, _pdf_path: Path, _output_dir: Path) -> str:
+        raise DoclingExtractionError("docling exploded")
+
+    def extract_pdf_text_result(self, _pdf_path: Path, _output_dir: Path, **_kwargs) -> DoclingTextResult:
         raise DoclingExtractionError("docling exploded")
 
 
@@ -137,6 +143,7 @@ class RetryApplicationDocling(DoclingTextExtractor):
         *,
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
+        progress_callback=None,
     ) -> DoclingTextResult:
         self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -169,6 +176,7 @@ class VlmApplicationDocling(RetryApplicationDocling):
         *,
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
+        progress_callback=None,
     ) -> DoclingTextResult:
         self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
         output_dir.mkdir(parents=True, exist_ok=True)

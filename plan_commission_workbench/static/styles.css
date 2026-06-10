@@ -208,6 +208,14 @@ td {
   vertical-align: top;
 }
 
+tr.selected-row td {
+  background: #f1f5f8;
+}
+
+tr.selected-row td:first-child {
+  border-left: 3px solid var(--blue);
+}
+
 th {
   color: var(--muted);
   font-size: 12px;
@@ -229,6 +237,10 @@ th {
 .log-line {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   padding: 6px 0;
+}
+
+.log-error {
+  color: #f4b8b8;
 }
 
 .cards {

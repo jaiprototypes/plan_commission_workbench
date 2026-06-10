@@ -74,6 +74,19 @@ SQLite lives at `data/workbench.db`. Downloaded PDFs and Docling sidecars are
 kept only in per-run temp folders under `data/tmp/` and are removed when the run
 ends. Durable state is the SQLite data plus reviewed exports.
 
+## Runtime Safeguards
+
+Long Docling conversions run in child worker processes with hard timeouts and
+visible run-log heartbeats. Useful controls:
+
+- `PCW_DOCLING_WORKER_PROGRESS_SECONDS`: worker progress ping interval, default
+  `30`.
+- `PCW_DOCLING_TIMEOUT_SECONDS`: default Docling timeout, default `120`.
+- `PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS`: full-page OCR retry timeout, default
+  `600`.
+- `PCW_DOCLING_VLM_TIMEOUT_SECONDS`: VLM fallback timeout, default `900`.
+- `PCW_RUN_STALE_SECONDS`: watchdog stale-run threshold, default `900`.
+
 ## Windows Desktop Build
 
 The Windows launcher starts the local FastAPI server, opens the browser only
