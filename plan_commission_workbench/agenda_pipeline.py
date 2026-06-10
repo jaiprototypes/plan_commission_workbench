@@ -11,7 +11,7 @@ from .exceptions import DoclingExtractionError, DownloadError, LLMResponseError,
 from .legistar import LegistarClient
 from .llm import LLMJsonClient
 from .models import AgendaClassification, AgendaSegment, EventRecord, RunRequest
-from .segmentation import AgendaSegmenter
+from .segmentation import AgendaSegmenter, is_non_action_agenda_item
 from .storage import ReviewStore
 
 
@@ -150,15 +150,9 @@ class AgendaPipeline:
             self.store.log_event(run_id, "agenda_segmented", "agenda", identity, f"Segmented {len(segments)} agenda item candidate(s)")
             if not segments:
                 raise WorkbenchStop(statuses.FAILED_AGENDA_LLM, f"No agenda items were segmented for {identity}")
-            if not self.store.heartbeat_run(
-                run_id,
-                statuses.AGENDA_CLASSIFYING,
-                "llm",
-                identity,
-                f"Classifying {len(segments)} agenda item(s) with OpenAI",
-            ):
+            classifications = self._classify_segments(run_id, identity, segments, request.request_text)
+            if not classifications:
                 return
-            classifications = self._classify_chunks(segments, request.request_text)
             if not self.store.run_is_running(run_id):
                 return
             self._persist_classifications(run_id, source_id, segments, classifications)
@@ -173,6 +167,43 @@ class AgendaPipeline:
             raise WorkbenchStop(statuses.FAILED_AGENDA_LLM, str(exc)) from exc
         finally:
             shutil.rmtree(docling_dir, ignore_errors=True)
+
+    def _classify_segments(
+        self,
+        run_id: int,
+        identity: str,
+        segments: list[AgendaSegment],
+        request_text: str | None,
+    ) -> list[AgendaClassification]:
+        """Purpose: classify project rows while routing non-action rows locally."""
+
+        local = [self._non_action_classification(segment) for segment in segments if is_non_action_agenda_item(segment.description)]
+        llm_segments = [segment for segment in segments if not is_non_action_agenda_item(segment.description)]
+        if local:
+            self.store.log_event(run_id, "agenda_non_action", "agenda", identity, f"Routed {len(local)} public-comment item(s) to not_target_project")
+        if not llm_segments:
+            return local
+        if not self.store.heartbeat_run(
+            run_id,
+            statuses.AGENDA_CLASSIFYING,
+            "llm",
+            identity,
+            f"Classifying {len(llm_segments)} agenda item(s) with OpenAI",
+        ):
+            return []
+        return [*local, *self._classify_chunks(llm_segments, request_text)]
+
+    def _non_action_classification(self, segment: AgendaSegment) -> AgendaClassification:
+        """Purpose: keep public-comment placeholders from becoming lead rows."""
+
+        reason = "Non-action public comment agenda item; not a project application"
+        return AgendaClassification(
+            segment.city_item_id,
+            statuses.NOT_TARGET_PROJECT,
+            1.0,
+            reason,
+            segment.description[:240],
+        )
 
     def _classify_chunks(
         self,

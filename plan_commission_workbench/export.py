@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import csv
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import statuses
+from .quality import CONTACT_PREFIXES, clean_text, contact_key, mailable_contact, raw_text_issue
 from .storage import ReviewStore
 
 
@@ -39,16 +39,6 @@ EXPORT_FIELDS = [
     "notes",
 ]
 
-LABEL_PREFIXES = ("applicant", "project_contact", "owner")
-RAW_LABEL_WORDS = (
-    "applicant name",
-    "city/state/zip",
-    "email",
-    "project contact person",
-    "property owner",
-    "street address",
-    "telephone",
-)
 @dataclass(frozen=True)
 class LabelContact:
     """Purpose: carry one cleaned contact destined for an address label."""
@@ -63,13 +53,12 @@ class LabelContact:
     def key(self) -> str:
         """Purpose: dedupe labels after whitespace and case normalization."""
 
-        value = f"{self.name}|{self.company}|{self.address}".lower()
-        return re.sub(r"\W+", " ", value).strip()
+        return contact_key(self.name, self.company, self.address)
 
     def lines(self) -> list[str]:
         """Purpose: format label lines for Avery address cells."""
 
-        return [self.name, self.company, self.address]
+        return [line for line in (self.name, self.company, self.address) if line]
 
 
 class ExportService:
@@ -133,7 +122,7 @@ class ExportService:
         issues: list[dict[str, Any]] = []
         seen: set[str] = set()
         for row in self._newest_rows_first(rows):
-            for prefix in LABEL_PREFIXES:
+            for prefix in CONTACT_PREFIXES:
                 contact, reason = self._label_contact(row, prefix)
                 if not contact:
                     if reason:
@@ -160,32 +149,18 @@ class ExportService:
     def _label_contact(self, row: dict[str, Any], prefix: str) -> tuple[LabelContact | None, str | None]:
         """Purpose: validate one applicant/project-contact/owner mailing record."""
 
-        name = self._clean_label_text(row.get(f"{prefix}_name"))
-        company = self._clean_label_text(row.get(f"{prefix}_company"))
-        address = self._clean_label_text(row.get(f"{prefix}_mailing_address"))
+        contact = mailable_contact(row, prefix)
+        name = clean_text(row.get(f"{prefix}_name"))
+        company = clean_text(row.get(f"{prefix}_company"))
+        address = clean_text(row.get(f"{prefix}_mailing_address"))
         if not any((name, company, address)):
             return None, None
-        missing = [label for label, value in (("name", name), ("company", company), ("address", address)) if not value]
-        if missing:
-            return None, f"missing {', '.join(missing)}"
-        raw_issue = self._raw_text_issue(name, company, address)
+        if not contact:
+            return None, "missing address or name/company"
+        raw_issue = raw_text_issue(name, company, address)
         if raw_issue:
             return None, raw_issue
         return LabelContact(int(row["id"]), prefix, name, company, address), None
-
-    def _clean_label_text(self, value: Any) -> str:
-        """Purpose: normalize operator-reviewed text before QC checks."""
-
-        return re.sub(r"\s+", " ", str(value or "")).strip(" ,")
-
-    def _raw_text_issue(self, *values: str) -> str | None:
-        """Purpose: reject Docling/form-label fragments before they reach labels."""
-
-        joined = " ".join(values).lower()
-        for word in RAW_LABEL_WORDS:
-            if word in joined:
-                return f"contains raw form label text: {word}"
-        return None
 
     def _write_avery_5160_docx(self, output_path: Path, contacts: list[LabelContact]) -> None:
         """Purpose: write Avery 5160/8160-style 30-up address labels."""

@@ -261,6 +261,10 @@ th {
   padding: 14px;
 }
 
+.card-warning {
+  border-color: rgba(166, 107, 0, 0.55);
+}
+
 .card-head {
   align-items: center;
   display: flex;
@@ -289,6 +293,36 @@ th {
 .evidence p {
   margin: 2px 0;
   overflow-wrap: anywhere;
+}
+
+.notice {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+}
+
+.notice strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notice ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.notice.warning {
+  background: #fff8eb;
+  border-color: rgba(166, 107, 0, 0.35);
+  color: #6f4700;
+}
+
+.notice.info {
+  background: #eef6fb;
+  border-color: rgba(45, 95, 139, 0.28);
+  color: #234b6d;
 }
 
 .source-attributes {

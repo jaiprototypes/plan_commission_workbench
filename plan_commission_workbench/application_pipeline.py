@@ -12,7 +12,7 @@ from .exceptions import DoclingExtractionError, DownloadError, LLMResponseError,
 from .legistar import LegistarClient
 from .llm import LLMJsonClient
 from .models import RunRequest
-from .segmentation import SectionClipper, has_non_item_agenda_tail
+from .segmentation import SectionClipper, has_non_item_agenda_tail, is_non_action_agenda_item
 from .storage import ReviewStore
 
 
@@ -122,6 +122,11 @@ class ApplicationPipeline:
         """Purpose: block old hit rows polluted by agenda boilerplate."""
 
         description = str(agenda_item.get("description") or "")
+        if is_non_action_agenda_item(description):
+            reason = "Non-action public comment agenda item; not a project application"
+            self.store.mark_agenda_not_target(int(agenda_item["id"]), reason)
+            self.store.log_event(run_id, "application_skip_non_action_agenda", "application", identity, reason)
+            return True
         if not has_non_item_agenda_tail(description):
             return False
         reason = "Agenda item includes Secretary/closing boilerplate; re-run agenda classification before application extraction"

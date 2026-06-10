@@ -255,7 +255,13 @@ def responder(_system: str, user: str):
             ]
         }
     return {
-        "applicant": {"name": "Jane Applicant", "company": "Applicant LLC"},
+        "target_project": True,
+        "target_reason": "Multifamily housing",
+        "applicant": {
+            "name": "Jane Applicant",
+            "company": "Applicant LLC",
+            "mailing_address": "123 Main Street, Madison, WI 53703",
+        },
         "project_contact": {"name": "Pat Contact", "email": "pat@example.com"},
         "owner": {},
         "section5_description": "Construct 100 dwelling units.",
@@ -379,6 +385,48 @@ def test_application_queue_skips_contaminated_historical_agenda_hit(tmp_path) ->
     assert legistar.downloads == 0
     assert docling.calls == 0
     assert any(event["stage"] == "application_skip_contaminated_agenda" for event in events)
+
+
+def test_application_queue_downgrades_public_comment_historical_hit(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = FakeLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2025, 12, 1), dt.date(2025, 12, 1), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27921",
+        file_id="60306",
+        attachment_id=None,
+        source_url="https://example.test/agenda-public-comment.pdf",
+        content_hash="agenda-public-comment",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = workbench.store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(
+            "27921",
+            "71173",
+            "60306",
+            dt.date(2025, 12, 1),
+            "Plan Commission Public Comment Period",
+        ),
+        AgendaClassification("71173", statuses.AGENDA_HIT, 0.8, "Public comment", "Public Comment Period"),
+    )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2025, 12, 1), dt.date(2025, 12, 1)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    downgraded = [item for item in workbench.store.list_agenda_items(statuses.NOT_TARGET_PROJECT) if item["id"] == agenda_id][0]
+    events = workbench.store.list_run_events(run_id)
+    assert downgraded["classification"] == statuses.NOT_TARGET_PROJECT
+    assert legistar.downloads == 0
+    assert docling.calls == 0
+    assert any(event["stage"] == "application_skip_non_action_agenda" for event in events)
 
 
 def test_application_docling_retries_full_page_ocr_when_sections_are_missing(tmp_path) -> None:

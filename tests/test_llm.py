@@ -72,7 +72,11 @@ def test_application_llm_validation_normalizes_contacts_and_evidence() -> None:
         responder=lambda _system, _user: {
             "target_project": True,
             "target_reason": "Multifamily housing",
-            "applicant": {"name": "Jane Applicant", "company": "Applicant LLC"},
+            "applicant": {
+                "name": "Jane Applicant",
+                "company": "Applicant LLC",
+                "mailing_address": "123 Main Street, Madison, WI 53703",
+            },
             "project_contact": {"email": "pat@example.com"},
             "owner": {},
             "section5_description": "Construct 48 dwelling units.",
@@ -96,6 +100,29 @@ def test_application_llm_validation_normalizes_contacts_and_evidence() -> None:
     assert extraction.target_project is True
     assert extraction.status == statuses.APPLICATION_EXTRACTED
     assert extraction.evidence[0].field_name == "unit_count"
+
+
+def test_application_llm_validation_routes_unknown_target_to_review() -> None:
+    client = LLMJsonClient(
+        responder=lambda _system, _user: {
+            "target_project": None,
+            "target_reason": "Section 5 was not clear enough to classify the project.",
+            "applicant": {
+                "company": "Unclear Development LLC",
+                "mailing_address": "123 Main Street, Madison, WI 53703",
+            },
+            "project_contact": {},
+            "owner": {},
+            "section5_description": "Project description could not be determined.",
+            "unit_count": None,
+            "evidence": [],
+        }
+    )
+
+    extraction = client.extract_application(1, "https://example.test/app.pdf", "171817", "Section text")
+
+    assert extraction.target_project is None
+    assert extraction.status == statuses.NEEDS_OPERATOR_REVIEW
 
 
 def test_application_llm_validation_rejects_non_target_project() -> None:

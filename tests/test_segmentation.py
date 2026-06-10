@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from plan_commission_workbench.segmentation import AgendaSegmenter, SectionClipper
+from plan_commission_workbench.segmentation import AgendaSegmenter, SectionClipper, is_non_action_agenda_item
 
 
 def test_agenda_segmenter_enriches_visible_file_id_from_event_items() -> None:
@@ -83,6 +83,11 @@ def test_agenda_segmenter_trims_secretary_report_from_final_item() -> None:
     assert "Certified Survey Map" in segments[0].description
     assert "Secretary" not in segments[0].description
     assert "mixed-use" not in segments[0].description
+
+
+def test_public_comment_period_is_non_action_agenda_item() -> None:
+    assert is_non_action_agenda_item("Plan Commission Public Comment Period")
+    assert not is_non_action_agenda_item("Consideration of a conditional use for 100 apartments")
 
 
 def test_section_clipper_returns_only_sections_3_and_5() -> None:

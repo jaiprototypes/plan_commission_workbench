@@ -10,6 +10,7 @@ from typing import Any, Callable
 from . import statuses
 from .exceptions import LLMResponseError
 from .models import AgendaClassification, AgendaSegment, ApplicationExtraction, ContactFields, FieldEvidence
+from .quality import application_status
 
 JsonResponder = Callable[[str, str], dict[str, Any]]
 JSON_TEXT_CONFIG = {"format": {"type": "json_object"}}
@@ -304,16 +305,35 @@ class LLMJsonClient:
         evidence = tuple(self._evidence(item) for item in payload.get("evidence") or [] if isinstance(item, dict))
         target_project = self._bool_or_none(payload.get("target_project"))
         target_reason = self._text_or_none(payload.get("target_reason"))
+        applicant = self._contact(payload.get("applicant"))
+        project_contact = self._contact(payload.get("project_contact"))
+        owner = self._contact(payload.get("owner"))
+        section5_description = self._text_or_none(payload.get("section5_description"))
+        status = application_status(
+            {
+                "target_project": target_project,
+                "section5_description": section5_description,
+                "applicant_name": applicant.name,
+                "applicant_company": applicant.company,
+                "applicant_mailing_address": applicant.mailing_address,
+                "project_contact_name": project_contact.name,
+                "project_contact_company": project_contact.company,
+                "project_contact_mailing_address": project_contact.mailing_address,
+                "owner_name": owner.name,
+                "owner_company": owner.company,
+                "owner_mailing_address": owner.mailing_address,
+            }
+        )
         return ApplicationExtraction(
             agenda_item_id=agenda_item_id,
             source_url=source_url,
             attachment_id=attachment_id,
-            applicant=self._contact(payload.get("applicant")),
-            project_contact=self._contact(payload.get("project_contact")),
-            owner=self._contact(payload.get("owner")),
-            section5_description=self._text_or_none(payload.get("section5_description")),
+            applicant=applicant,
+            project_contact=project_contact,
+            owner=owner,
+            section5_description=section5_description,
             unit_count=self._int_or_none(payload.get("unit_count")),
-            status=statuses.REJECTED if target_project is False else statuses.APPLICATION_EXTRACTED,
+            status=status,
             target_project=target_project,
             target_reason=target_reason,
             evidence=evidence,

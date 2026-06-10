@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from . import statuses
 from .models import AgendaClassification, AgendaSegment, ApplicationExtraction, FieldEvidence
+from .quality import CONTACT_PREFIXES, application_quality_issues, contact_key, mailable_contact
 
 
 def _now() -> str:
@@ -91,6 +92,9 @@ class ReviewStore:
         with self.transaction() as conn:
             conn.executescript(SCHEMA_SQL)
             self._ensure_columns(conn)
+            self._normalize_stored_agenda_statuses(conn)
+            self._normalize_stored_application_statuses(conn)
+            self._refresh_all_run_counters(conn)
 
     def backup_to(self, destination: Path) -> Path:
         """Purpose: create a consistent DB copy while the server may be running."""
@@ -139,6 +143,126 @@ class ReviewStore:
             WHERE source_kind = 'application' AND content_hash IS NOT NULL AND content_hash != ''
             """
         )
+
+    def _normalize_stored_agenda_statuses(self, conn: sqlite3.Connection) -> None:
+        """Purpose: downgrade old non-action agenda hits on startup."""
+
+        reason = "Non-action public comment agenda item; not a project application"
+        conn.execute(
+            """
+            UPDATE agenda_items
+            SET classification = ?, confidence = 1, reason = ?, evidence_snippet = ?, updated_at = ?
+            WHERE classification = ?
+              AND (
+                lower(trim(coalesce(description, ''))) LIKE 'plan commission public comment period%'
+                OR lower(trim(coalesce(description, ''))) LIKE 'public comment period%'
+              )
+            """,
+            (statuses.NOT_TARGET_PROJECT, reason, reason[:240], _now(), statuses.AGENDA_HIT),
+        )
+
+    def _normalize_stored_application_statuses(self, conn: sqlite3.Connection) -> None:
+        """Purpose: migrate older optimistic extraction statuses into review queues."""
+
+        conn.execute(
+            """
+            UPDATE application_extractions
+            SET status = ?, updated_at = ?
+            WHERE status = ? AND target_project = 0
+            """,
+            (statuses.REJECTED, _now(), statuses.APPLICATION_EXTRACTED),
+        )
+        conn.execute(
+            f"""
+            UPDATE application_extractions
+            SET status = ?, updated_at = ?
+            WHERE status = ?
+              AND (
+                target_project IS NULL OR target_project != 1
+                OR trim(coalesce(section5_description, '')) = ''
+                OR NOT ({self._mailable_contact_sql()})
+                OR EXISTS (
+                    SELECT 1 FROM agenda_items
+                    WHERE agenda_items.id = application_extractions.agenda_item_id
+                      AND agenda_items.classification != ?
+                )
+              )
+            """,
+            (statuses.NEEDS_OPERATOR_REVIEW, _now(), statuses.APPLICATION_EXTRACTED, statuses.AGENDA_HIT),
+        )
+
+    def _mailable_contact_sql(self) -> str:
+        """Purpose: mirror contact QC in SQLite startup migration SQL."""
+
+        checks = []
+        for prefix in CONTACT_PREFIXES:
+            checks.append(
+                f"""
+                (
+                    trim(coalesce({prefix}_mailing_address, '')) != ''
+                    AND (
+                        trim(coalesce({prefix}_name, '')) != ''
+                        OR trim(coalesce({prefix}_company, '')) != ''
+                    )
+                )
+                """
+            )
+        return " OR ".join(checks)
+
+    def _refresh_all_run_counters(self, conn: sqlite3.Connection) -> None:
+        """Purpose: keep historical run counters aligned after status migrations."""
+
+        rows = conn.execute("SELECT id, date_from, date_to FROM runs").fetchall()
+        for row in rows:
+            counters = self._run_counters(conn, row["date_from"], row["date_to"])
+            conn.execute(
+                """
+                UPDATE runs
+                SET agenda_total = ?, agenda_hits = ?, applications_total = ?, applications_extracted = ?
+                WHERE id = ?
+                """,
+                (*counters, row["id"]),
+            )
+
+    def _run_counters(self, conn: sqlite3.Connection, date_from: str, date_to: str) -> tuple[int, int, int, int]:
+        """Purpose: calculate run counters for one date range."""
+
+        agenda_total = conn.execute(
+            "SELECT COUNT(*) FROM agenda_items WHERE meeting_date BETWEEN ? AND ?",
+            (date_from, date_to),
+        ).fetchone()[0]
+        agenda_hits = conn.execute(
+            """
+            SELECT COUNT(*) FROM agenda_items
+            WHERE meeting_date BETWEEN ? AND ? AND classification = ?
+            """,
+            (date_from, date_to, statuses.AGENDA_HIT),
+        ).fetchone()[0]
+        app_total = conn.execute(
+            """
+            SELECT COUNT(*) FROM application_extractions app
+            JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+            WHERE agenda.meeting_date BETWEEN ? AND ?
+            """,
+            (date_from, date_to),
+        ).fetchone()[0]
+        app_done = conn.execute(
+            """
+            SELECT COUNT(*) FROM application_extractions app
+            JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+            WHERE agenda.meeting_date BETWEEN ? AND ? AND app.status IN (?, ?, ?, ?)
+            """,
+            (
+                date_from,
+                date_to,
+                statuses.APPLICATION_EXTRACTED,
+                statuses.NEEDS_OPERATOR_REVIEW,
+                statuses.ACCEPTED,
+                statuses.REJECTED,
+            ),
+        ).fetchone()[0]
+        return int(agenda_total), int(agenda_hits), int(app_total), int(app_done)
+
 
     def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         """Purpose: read SQLite table columns for tiny migrations."""
@@ -355,49 +479,14 @@ class ReviewStore:
             run = conn.execute("SELECT date_from, date_to FROM runs WHERE id = ?", (run_id,)).fetchone()
             if not run:
                 return
-            date_from = run["date_from"]
-            date_to = run["date_to"]
-            agenda_total = conn.execute(
-                "SELECT COUNT(*) FROM agenda_items WHERE meeting_date BETWEEN ? AND ?",
-                (date_from, date_to),
-            ).fetchone()[0]
-            agenda_hits = conn.execute(
-                """
-                SELECT COUNT(*) FROM agenda_items
-                WHERE meeting_date BETWEEN ? AND ? AND classification = ?
-                """,
-                (date_from, date_to, statuses.AGENDA_HIT),
-            ).fetchone()[0]
-            app_total = conn.execute(
-                """
-                SELECT COUNT(*) FROM application_extractions app
-                JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
-                WHERE agenda.meeting_date BETWEEN ? AND ?
-                """,
-                (date_from, date_to),
-            ).fetchone()[0]
-            app_done = conn.execute(
-                """
-                SELECT COUNT(*) FROM application_extractions app
-                JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
-                WHERE agenda.meeting_date BETWEEN ? AND ? AND app.status IN (?, ?, ?, ?)
-                """,
-                (
-                    date_from,
-                    date_to,
-                    statuses.APPLICATION_EXTRACTED,
-                    statuses.NEEDS_OPERATOR_REVIEW,
-                    statuses.ACCEPTED,
-                    statuses.REJECTED,
-                ),
-            ).fetchone()[0]
+            counters = self._run_counters(conn, run["date_from"], run["date_to"])
             conn.execute(
                 """
                 UPDATE runs
                 SET agenda_total = ?, agenda_hits = ?, applications_total = ?, applications_extracted = ?
                 WHERE id = ?
                 """,
-                (agenda_total, agenda_hits, app_total, app_done, run_id),
+                (*counters, run_id),
             )
 
     def fail_run_from_exception(self, run_id: int, status: str, exc: BaseException) -> None:
@@ -661,11 +750,31 @@ class ReviewStore:
             )
             return bool(cur.rowcount)
 
+    def mark_agenda_not_target(self, agenda_item_id: int, reason: str) -> bool:
+        """Purpose: downgrade non-action historical hit rows deterministically."""
+
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """
+                UPDATE agenda_items
+                SET classification = ?, confidence = 1, reason = ?, evidence_snippet = ?, updated_at = ?
+                WHERE id = ? AND classification = ?
+                """,
+                (statuses.NOT_TARGET_PROJECT, reason, reason[:240], _now(), agenda_item_id, statuses.AGENDA_HIT),
+            )
+            return bool(cur.rowcount)
+
     def application_complete(self, agenda_item_id: int, source_url: str | None = None, attachment_id: str | None = None) -> bool:
         """Purpose: decide whether application Docling and LLM work can be skipped."""
 
-        clauses = ["agenda_item_id = ?", "status IN (?, ?, ?)"]
-        params: list[Any] = [agenda_item_id, statuses.APPLICATION_EXTRACTED, statuses.ACCEPTED, statuses.REJECTED]
+        clauses = ["agenda_item_id = ?", "status IN (?, ?, ?, ?)"]
+        params: list[Any] = [
+            agenda_item_id,
+            statuses.APPLICATION_EXTRACTED,
+            statuses.NEEDS_OPERATOR_REVIEW,
+            statuses.ACCEPTED,
+            statuses.REJECTED,
+        ]
         if source_url:
             clauses.append("source_url = ?")
             params.append(source_url)
@@ -773,7 +882,7 @@ class ReviewStore:
             rows = conn.execute(
                 f"""
                 SELECT app.*, agenda.event_id, agenda.city_item_id, agenda.file_id, agenda.meeting_date,
-                       agenda.description AS agenda_description
+                       agenda.description AS agenda_description, agenda.classification AS agenda_classification
                 FROM application_extractions app
                 JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
                 {where}
@@ -781,7 +890,69 @@ class ReviewStore:
                 """,
                 params,
             ).fetchall()
-            return [dict(row) for row in rows]
+            return self._decorate_application_rows(conn, [dict(row) for row in rows])
+
+    def _decorate_application_rows(self, conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Purpose: attach QC and duplicate-contact context for review screens."""
+
+        accepted = self._accepted_contact_index(conn)
+        for row in rows:
+            row["quality_issues"] = application_quality_issues(row)
+            row["duplicate_contacts"] = self._duplicate_contacts(row, accepted)
+        return rows
+
+    def _accepted_contact_index(self, conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+        """Purpose: index already accepted contacts for review-time dedupe notices."""
+
+        rows = conn.execute(
+            """
+            SELECT app.*, agenda.city_item_id, agenda.meeting_date, review.corrected_fields_json
+            FROM application_extractions app
+            JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+            LEFT JOIN operator_reviews review ON review.extraction_id = app.id
+            WHERE app.status = ?
+            """,
+            (statuses.ACCEPTED,),
+        ).fetchall()
+        index: dict[str, list[dict[str, Any]]] = {}
+        for raw in rows:
+            row = self._apply_corrections(dict(raw))
+            for prefix in CONTACT_PREFIXES:
+                contact = mailable_contact(row, prefix)
+                if not contact:
+                    continue
+                key = contact_key(*contact)
+                index.setdefault(key, []).append(
+                    {
+                        "extraction_id": row["id"],
+                        "city_item_id": row.get("city_item_id"),
+                        "meeting_date": row.get("meeting_date"),
+                        "contact_type": prefix,
+                    }
+                )
+        return index
+
+    def _duplicate_contacts(self, row: dict[str, Any], accepted: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Purpose: tell reviewers when a contact is already saved elsewhere."""
+
+        duplicates: list[dict[str, Any]] = []
+        for prefix in CONTACT_PREFIXES:
+            contact = mailable_contact(row, prefix)
+            if not contact:
+                continue
+            for match in accepted.get(contact_key(*contact), []):
+                if int(match["extraction_id"]) == int(row["id"]):
+                    continue
+                duplicates.append(
+                    {
+                        "contact_type": prefix,
+                        "matched_extraction_id": match["extraction_id"],
+                        "matched_city_item_id": match["city_item_id"],
+                        "matched_meeting_date": match["meeting_date"],
+                        "message": f"{prefix.replace('_', ' ').title()} contact is already saved from item {match['city_item_id']}; this is a new project row.",
+                    }
+                )
+        return duplicates
 
     def get_field_evidence(self, extraction_id: int) -> list[dict[str, Any]]:
         """Purpose: return evidence snippets for one extraction."""
@@ -809,6 +980,11 @@ class ReviewStore:
             row = conn.execute("SELECT * FROM application_extractions WHERE id = ?", (extraction_id,)).fetchone()
             if not row:
                 raise KeyError(f"Application extraction {extraction_id} not found")
+            if status == statuses.ACCEPTED:
+                effective = self._review_effective_row(conn, dict(row), corrected_fields or {})
+                issues = application_quality_issues(effective)
+                if issues:
+                    raise ValueError(f"Cannot accept until QC is resolved: {'; '.join(issues)}")
             conn.execute("UPDATE application_extractions SET status = ?, updated_at = ? WHERE id = ?", (status, _now(), extraction_id))
             conn.execute(
                 """
@@ -824,6 +1000,19 @@ class ReviewStore:
                 (extraction_id, status, corrected_json, notes, _now()),
             )
         return self.list_application_extractions()[0] if False else {"id": extraction_id, "status": status}
+
+    def _review_effective_row(
+        self,
+        conn: sqlite3.Connection,
+        row: dict[str, Any],
+        corrected_fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Purpose: validate acceptance against stored values plus corrections."""
+
+        agenda = conn.execute("SELECT classification FROM agenda_items WHERE id = ?", (row["agenda_item_id"],)).fetchone()
+        row["agenda_classification"] = agenda["classification"] if agenda else None
+        row["corrected_fields_json"] = json.dumps(corrected_fields or {}, sort_keys=True)
+        return self._apply_corrections(row)
 
     def accepted_export_rows(self, status: str) -> list[dict[str, Any]]:
         """Purpose: read exportable rows only from accepted database data."""

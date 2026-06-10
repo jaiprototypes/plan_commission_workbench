@@ -13,6 +13,7 @@ NON_ITEM_TAIL_RE = re.compile(
     r"\s*(?:#+\s*)?(?:Secretary's Report|Member Announcements(?:,\s*Communications or Business Items)?|Adjournment|Registrations)\b.*$",
     re.IGNORECASE,
 )
+NON_ACTION_ITEM_RE = re.compile(r"^\s*(?:Plan Commission\s+)?Public Comment Period\b", re.IGNORECASE)
 SPACE_RE = re.compile(r"\s+")
 
 
@@ -20,6 +21,12 @@ def has_non_item_agenda_tail(text: str) -> bool:
     """Purpose: detect agenda boilerplate accidentally merged into an item."""
 
     return bool(NON_ITEM_TAIL_RE.search(text))
+
+
+def is_non_action_agenda_item(text: str) -> bool:
+    """Purpose: identify agenda rows that are not project applications."""
+
+    return bool(NON_ACTION_ITEM_RE.search(SPACE_RE.sub(" ", text).strip()))
 
 
 class AgendaSegmenter:

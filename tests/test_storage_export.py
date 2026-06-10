@@ -62,12 +62,17 @@ def test_store_dedupe_review_and_export(tmp_path) -> None:
             agenda_item_id=agenda_id,
             source_url="https://example.test/application.pdf",
             attachment_id="171817",
-            applicant=ContactFields(name="Jane Applicant"),
+            applicant=ContactFields(
+                name="Jane Applicant",
+                company="Applicant LLC",
+                mailing_address="123 Main Street, Madison, WI 53703",
+            ),
             project_contact=ContactFields(email="pat@example.com"),
             owner=ContactFields(),
             section5_description="Construct 48 dwelling units.",
             unit_count=48,
             status=statuses.APPLICATION_EXTRACTED,
+            target_project=True,
             evidence=(FieldEvidence("unit_count", 48, "48 dwelling units", 0.9),),
         ),
     )
@@ -132,6 +137,7 @@ def test_label_export_uses_corrected_clean_contacts_and_reports_qc(tmp_path) -> 
             section5_description="Construct 48 dwelling units.",
             unit_count=48,
             status=statuses.APPLICATION_EXTRACTED,
+            target_project=True,
         ),
     )
     store.review_application(
@@ -157,6 +163,31 @@ def test_label_export_uses_corrected_clean_contacts_and_reports_qc(tmp_path) -> 
     assert "Clean Housing LLC" in body
     assert "123 Main Street, Madison, Wisconsin" in body
     assert "Pat Contact" not in body
+
+
+def test_label_export_allows_company_only_contacts(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 6, 1),
+        city_item_id="96005",
+        applicant=ContactFields(
+            company="Company Only Housing LLC",
+            mailing_address="123 Main Street, Madison, Wisconsin",
+        ),
+        project_contact=ContactFields(),
+    )
+
+    result = ExportService(store).export(tmp_path / "labels.docx", statuses.ACCEPTED)
+    body = _docx_text(tmp_path / "labels.docx")
+
+    assert result["row_count"] == 1
+    assert result["qc_issues"] == []
+    assert "Company Only Housing LLC" in body
+    assert "123 Main Street, Madison, Wisconsin" in body
 
 
 def test_data_relative_export_path_uses_runtime_data_dir(tmp_path) -> None:
@@ -354,6 +385,139 @@ def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
     assert [row[0] for row in rows] == [first, second]
 
 
+def test_startup_migration_downgrades_public_comment_hits_and_counters(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2025, 12, 1), dt.date(2025, 12, 1), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27921",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("27921", "71173", "60306", dt.date(2025, 12, 1), "Plan Commission Public Comment Period"),
+        AgendaClassification("71173", statuses.AGENDA_HIT, 0.8, "Public comment", "Public comment"),
+    )
+    store.update_counters(run_id)
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+
+    run = reopened.get_run(run_id)
+    assert run and run["agenda_hits"] == 0
+    assert reopened.list_agenda_items(statuses.NOT_TARGET_PROJECT)[0]["city_item_id"] == "71173"
+
+
+def test_review_acceptance_rejects_uncertain_or_unmailable_rows(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="1",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("1", "1001", "9001", dt.date(2026, 1, 1), "Construct apartments"),
+        AgendaClassification("1001", statuses.AGENDA_HIT, 0.9, "Housing", "Construct apartments"),
+    )
+    app_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="1",
+        file_id="9001",
+        attachment_id="a",
+        source_url="https://example.test/application.pdf",
+        content_hash="app-hash",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url="https://example.test/application.pdf",
+            attachment_id="a",
+            applicant=ContactFields(name="Jane Applicant"),
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="Construct apartments.",
+            unit_count=None,
+            status=statuses.NEEDS_OPERATOR_REVIEW,
+            target_project=None,
+        ),
+    )
+
+    try:
+        store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
+    except ValueError as exc:
+        assert "Target project is not confirmed" in str(exc)
+    else:
+        raise AssertionError("Expected acceptance QC failure")
+
+    store.review_application(
+        extraction_id,
+        statuses.ACCEPTED,
+        {
+            "target_project": True,
+            "applicant_company": "Applicant LLC",
+            "applicant_mailing_address": "123 Main Street, Madison, WI 53703",
+        },
+        None,
+    )
+
+    assert store.list_application_extractions(statuses.ACCEPTED)[0]["id"] == extraction_id
+
+
+def test_review_rows_report_duplicate_accepted_contacts(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 2, 28), None)
+    _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 10),
+        city_item_id="1001",
+        applicant=ContactFields(
+            name="Shared Contact",
+            company="Shared Housing LLC",
+            mailing_address="123 Main Street, Madison, Wisconsin",
+        ),
+        project_contact=ContactFields(),
+    )
+    pending_id = _pending_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 2, 10),
+        city_item_id="1002",
+        applicant=ContactFields(
+            name="Shared Contact",
+            company="Shared Housing LLC",
+            mailing_address="123 Main Street, Madison, Wisconsin",
+        ),
+    )
+
+    row = [item for item in store.list_application_extractions(statuses.APPLICATION_EXTRACTED) if item["id"] == pending_id][0]
+
+    assert row["duplicate_contacts"]
+    assert "already saved" in row["duplicate_contacts"][0]["message"]
+
+
 def test_watchdog_marks_stale_application_docling_run_and_preserves_failure(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()
@@ -528,10 +692,65 @@ def _accepted_extraction(
             section5_description="Construct housing.",
             unit_count=10,
             status=statuses.APPLICATION_EXTRACTED,
+            target_project=True,
         ),
     )
     store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
     return extraction_id
+
+
+def _pending_extraction(
+    store: ReviewStore,
+    run_id: int,
+    *,
+    meeting_date: dt.date,
+    city_item_id: str,
+    applicant: ContactFields,
+) -> int:
+    """Purpose: seed one review-ready row without accepting it."""
+
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id=f"event-{city_item_id}",
+        file_id=None,
+        attachment_id=None,
+        source_url=f"https://example.test/agenda-{city_item_id}.pdf",
+        content_hash=f"agenda-hash-{city_item_id}",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(f"event-{city_item_id}", city_item_id, city_item_id, meeting_date, "Construct housing"),
+        AgendaClassification(city_item_id, statuses.AGENDA_HIT, 0.9, "Housing", "Construct housing"),
+    )
+    app_source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id=f"event-{city_item_id}",
+        file_id=city_item_id,
+        attachment_id=f"attachment-{city_item_id}",
+        source_url=f"https://example.test/application-{city_item_id}.pdf",
+        content_hash=f"application-hash-{city_item_id}",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    return store.upsert_application_extraction(
+        run_id,
+        app_source_id,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url=f"https://example.test/application-{city_item_id}.pdf",
+            attachment_id=f"attachment-{city_item_id}",
+            applicant=applicant,
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="Construct housing.",
+            unit_count=10,
+            status=statuses.APPLICATION_EXTRACTED,
+            target_project=True,
+        ),
+    )
 
 
 def _docx_text(path) -> str:

@@ -29,7 +29,12 @@ async function getJson(url, options = {}) {
   return response.json();
 }
 
-function statusClass(status) {
+function qualityIssues(row) {
+  return row?.quality_issues || [];
+}
+
+function statusClass(status, row = null) {
+  if (status === "application_extracted" && qualityIssues(row).length) return "warn";
   if (["completed", "accepted", "application_extracted", "agenda_hit"].includes(status)) return "ok";
   if (String(status || "").startsWith("failed") || status === "rejected") return "fail";
   return "warn";
@@ -188,6 +193,30 @@ function contactBlock(title, prefix, row) {
   `;
 }
 
+function qualityNotice(row) {
+  const issues = qualityIssues(row);
+  if (!issues.length) return "";
+  const items = issues.map((issue) => `<li>${escapeHtml(issue)}</li>`).join("");
+  return `
+    <div class="notice warning">
+      <strong>QC review required</strong>
+      <ul>${items}</ul>
+    </div>
+  `;
+}
+
+function duplicateNotice(row) {
+  const duplicates = row.duplicate_contacts || [];
+  if (!duplicates.length) return "";
+  const items = duplicates.map((item) => `<li>${escapeHtml(item.message)}</li>`).join("");
+  return `
+    <div class="notice info">
+      <strong>Saved contact match</strong>
+      <ul>${items}</ul>
+    </div>
+  `;
+}
+
 function sourceAttributeRow(item) {
   const value = String(item.value ?? "").trim() || "No extracted value";
   const confidence = Number(item.confidence ?? 0).toFixed(2);
@@ -226,6 +255,8 @@ function sourceAttributes(evidence) {
 
 function applicationCard(row, review = false) {
   const rawAttributes = sourceAttributes(row.evidence || []);
+  const warnings = qualityNotice(row);
+  const duplicates = duplicateNotice(row);
   const actions = review ? `
     <div class="review-actions">
       <textarea data-corrections="${row.id}" placeholder='{"applicant_name":"Corrected value"}'></textarea>
@@ -235,11 +266,13 @@ function applicationCard(row, review = false) {
     </div>
   ` : "";
   return `
-    <article class="card">
+    <article class="card ${qualityIssues(row).length ? "card-warning" : ""}">
       <div class="card-head">
         <strong>${escapeHtml(row.meeting_date)} | Item ${escapeHtml(row.city_item_id)}</strong>
-        <span class="${statusClass(row.status)}">${escapeHtml(row.status)}</span>
+        <span class="${statusClass(row.status, row)}">${escapeHtml(row.status)}</span>
       </div>
+      ${warnings}
+      ${duplicates}
       <div class="fields">
         ${contactBlock("Applicant", "applicant", row)}
         ${contactBlock("Project Contact", "project_contact", row)}
@@ -297,7 +330,11 @@ async function submitReview(id, status) {
 async function loadReview() {
   const list = $("#review-list");
   if (!list) return;
-  const rows = await getJson("/application-extractions?status=application_extracted");
+  const [extractedRows, reviewRows] = await Promise.all([
+    getJson("/application-extractions?status=application_extracted"),
+    getJson("/application-extractions?status=needs_operator_review"),
+  ]);
+  const rows = [...reviewRows, ...extractedRows];
   list.innerHTML = rows.map((row) => applicationCard(row, true)).join("");
   list.querySelectorAll("[data-accept]").forEach((button) => {
     button.addEventListener("click", () => submitReview(button.dataset.accept, "accepted").catch(alert));
