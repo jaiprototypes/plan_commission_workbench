@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,17 @@ def test_docling_full_page_result_uses_mode_aware_factory(tmp_path: Path) -> Non
     assert modes == ["full_page_ocr"]
     assert result.mode == "full_page_ocr"
     assert result.output_path.name == "application.pdf.full_page_ocr.docling.txt"
+
+
+def test_docling_subprocess_timeout_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "application.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n" + (b"body\n" * 12) + b"%%EOF\n")
+
+    def fake_run(*_args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="docling-worker", timeout=kwargs["timeout"])
+
+    monkeypatch.setenv("PCW_DOCLING_TIMEOUT_SECONDS", "10")
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.run", fake_run)
+
+    with pytest.raises(DoclingExtractionError, match="timed out after 10 seconds"):
+        DoclingTextExtractor().extract_pdf_text_result(pdf_path, tmp_path / "docling")

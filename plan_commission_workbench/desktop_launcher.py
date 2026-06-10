@@ -10,6 +10,7 @@ import threading
 import time
 import traceback
 import webbrowser
+import multiprocessing
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -281,6 +282,12 @@ class DesktopLauncher:
 def main() -> None:
     """Purpose: executable entry point for PyInstaller and local smoke tests."""
 
+    multiprocessing.freeze_support()
+    if "--docling-worker" in sys.argv:
+        from plan_commission_workbench.docling_worker import main as worker_main
+
+        index = sys.argv.index("--docling-worker")
+        raise SystemExit(worker_main(sys.argv[index + 1 :]))
     if "--self-test-docling" in sys.argv:
         raise SystemExit(run_docling_self_test())
     DesktopLauncher().run()

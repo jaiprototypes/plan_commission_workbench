@@ -199,7 +199,13 @@ class ApplicationPipeline:
         """Purpose: run one Docling mode with heartbeat and granular logs."""
 
         mode = "full-page OCR" if force_full_page_ocr else "default"
-        if not self.store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", identity, f"Extracting {pdf_path.name} with Docling {mode}"):
+        if not self.store.heartbeat_run(
+            run_id,
+            statuses.APPLICATION_DOCLING,
+            "docling",
+            identity,
+            f"Extracting {pdf_path.name} with Docling {mode}; {self.docling.mode_timeout_summary(force_full_page_ocr)}",
+        ):
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOCLING, "Run stopped before Docling extraction")
         try:
             result = self.docling.extract_pdf_text_result(

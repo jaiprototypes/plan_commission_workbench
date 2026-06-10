@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, Callable
 
 from .exceptions import DoclingExtractionError
@@ -36,12 +39,9 @@ class DoclingTextExtractor:
         """Purpose: extract text and report whether default or OCR mode was used."""
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("DOCLING_CACHE_DIR", str(output_dir / "cache"))
         mode = "full_page_ocr" if force_full_page_ocr else "default"
         try:
-            converter = self._converter(force_full_page_ocr=force_full_page_ocr)
-            result = converter.convert(str(pdf_path))
-            text = self._result_text(result)
+            text = self._extract_text(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
         except Exception as exc:
             raise DoclingExtractionError(f"Docling {mode} failed for {pdf_path.name}: {exc}; {self._file_context(pdf_path)}") from exc
         if not text.strip():
@@ -49,6 +49,75 @@ class DoclingTextExtractor:
         sidecar = output_dir / f"{pdf_path.name}.{mode}.docling.txt"
         sidecar.write_text(text, encoding="utf-8")
         return DoclingTextResult(text=text, mode=mode, output_path=sidecar)
+
+    def _extract_text(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+        """Purpose: run Docling in-process for tests or subprocess for hard timeouts."""
+
+        if self.converter_factory:
+            return self._extract_text_inline(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
+        return self._extract_text_subprocess(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
+
+    def _extract_text_inline(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+        """Purpose: run Docling directly when tests inject a fake converter."""
+
+        os.environ.setdefault("DOCLING_CACHE_DIR", str(output_dir / "cache"))
+        converter = self._converter(force_full_page_ocr=force_full_page_ocr)
+        result = converter.convert(str(pdf_path))
+        return self._result_text(result)
+
+    def _extract_text_subprocess(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+        """Purpose: isolate Docling so a hung converter can be timed out."""
+
+        mode = "full_page_ocr" if force_full_page_ocr else "default"
+        output_json = output_dir / f"{pdf_path.name}.{mode}.worker.json"
+        timeout_seconds = self._timeout_seconds(force_full_page_ocr)
+        command = self._worker_command(pdf_path, output_json, force_full_page_ocr)
+        env = os.environ.copy()
+        env["DOCLING_CACHE_DIR"] = str(output_dir / "cache")
+        env["PCW_DOCLING_FULL_PAGE_OCR_BACKEND"] = self.full_page_ocr_backend
+        env["PCW_DOCLING_IMAGES_SCALE"] = str(self._images_scale())
+        try:
+            completed = subprocess.run(command, capture_output=True, env=env, text=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
+            raise DoclingExtractionError(f"Docling {mode} worker exited {completed.returncode}: {detail}")
+        try:
+            payload = json.loads(output_json.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise DoclingExtractionError(f"Docling {mode} worker did not write readable output") from exc
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise DoclingExtractionError(f"Docling {mode} worker output did not contain text")
+        return text
+
+    def _worker_command(self, pdf_path: Path, output_json: Path, force_full_page_ocr: bool) -> list[str]:
+        """Purpose: invoke the Docling worker in source or frozen desktop builds."""
+
+        args = [
+            "--docling-worker",
+            "--pdf",
+            str(pdf_path),
+            "--output-json",
+            str(output_json),
+            "--mode",
+            "full_page_ocr" if force_full_page_ocr else "default",
+        ]
+        if getattr(sys, "frozen", False):
+            return [sys.executable, *args]
+        return [sys.executable, "-m", "plan_commission_workbench.docling_worker", *args[1:]]
+
+    def _timeout_seconds(self, force_full_page_ocr: bool) -> float:
+        """Purpose: bound Docling work so retry logic can proceed."""
+
+        name = "PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS" if force_full_page_ocr else "PCW_DOCLING_TIMEOUT_SECONDS"
+        default = 600.0 if force_full_page_ocr else 120.0
+        try:
+            value = float(os.getenv(name, str(default)))
+        except ValueError:
+            return default
+        return max(10.0, value)
 
     def _converter(self, *, force_full_page_ocr: bool = False) -> Any:
         """Purpose: instantiate Docling lazily so tests can mock it."""
@@ -129,7 +198,16 @@ class DoclingTextExtractor:
     def full_page_ocr_summary(self) -> str:
         """Purpose: describe the configured retry mode in run logs."""
 
-        return f"backend={self.full_page_ocr_backend}, images_scale={self._images_scale():g}"
+        return (
+            f"backend={self.full_page_ocr_backend}, images_scale={self._images_scale():g}, "
+            f"timeout_seconds={self._timeout_seconds(True):g}"
+        )
+
+    def mode_timeout_summary(self, force_full_page_ocr: bool) -> str:
+        """Purpose: describe Docling timeout settings in run logs."""
+
+        mode = "full_page_ocr" if force_full_page_ocr else "default"
+        return f"mode={mode}, timeout_seconds={self._timeout_seconds(force_full_page_ocr):g}"
 
     def _result_text(self, result: Any) -> str:
         """Purpose: support common Docling document export shapes."""
