@@ -173,19 +173,57 @@ class ApplicationPipeline:
     def _extract_clipped_sections(self, run_id: int, identity: str, pdf_path: Path, docling_dir: Path) -> str:
         """Purpose: retry bad application Docling output with full-page OCR."""
 
-        default_result = self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=False)
-        clipped = self._clip_and_log(run_id, identity, default_result)
-        if clipped.strip() or not self._full_page_retry_enabled():
+        clipped = self._try_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=False)
+        if clipped.strip():
             return clipped
-        self.store.log_event(
-            run_id,
-            "application_docling_retry",
-            "docling",
-            identity,
-            f"Retrying {pdf_path.name} with full-page OCR because default Docling did not expose Sections 3 and 5; {self._full_page_ocr_summary()}",
-        )
-        retry_result = self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=True)
-        return self._clip_and_log(run_id, identity, retry_result)
+        if self._full_page_retry_enabled():
+            self.store.log_event(
+                run_id,
+                "application_docling_retry",
+                "docling",
+                identity,
+                f"Retrying {pdf_path.name} with full-page OCR because default Docling did not expose Sections 3 and 5; {self._full_page_ocr_summary()}",
+            )
+            clipped = self._try_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=True)
+            if clipped.strip():
+                return clipped
+        if self._vlm_retry_enabled():
+            self.store.log_event(
+                run_id,
+                "application_docling_vlm_retry",
+                "docling",
+                identity,
+                f"Retrying {pdf_path.name} with Docling VLM because default/OCR modes did not expose Sections 3 and 5; {self._vlm_summary()}",
+            )
+            return self._try_docling_mode(run_id, identity, pdf_path, docling_dir, use_vlm=True)
+        return ""
+
+    def _try_docling_mode(
+        self,
+        run_id: int,
+        identity: str,
+        pdf_path: Path,
+        docling_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+    ) -> str:
+        """Purpose: convert and clip one Docling mode without blocking later fallbacks."""
+
+        try:
+            result = self._extract_docling_mode(
+                run_id,
+                identity,
+                pdf_path,
+                docling_dir,
+                force_full_page_ocr=force_full_page_ocr,
+                use_vlm=use_vlm,
+            )
+        except DoclingExtractionError as exc:
+            stage = "application_docling_vlm_failed" if use_vlm else "application_docling_full_page_failed" if force_full_page_ocr else "application_docling_default_failed"
+            self.store.log_event(run_id, stage, "docling", identity, str(exc))
+            return ""
+        return self._clip_and_log(run_id, identity, result)
 
     def _extract_docling_mode(
         self,
@@ -195,35 +233,25 @@ class ApplicationPipeline:
         docling_dir: Path,
         *,
         force_full_page_ocr: bool,
+        use_vlm: bool = False,
     ) -> DoclingTextResult:
         """Purpose: run one Docling mode with heartbeat and granular logs."""
 
-        mode = "full-page OCR" if force_full_page_ocr else "default"
+        mode = "VLM" if use_vlm else "full-page OCR" if force_full_page_ocr else "default"
         if not self.store.heartbeat_run(
             run_id,
             statuses.APPLICATION_DOCLING,
             "docling",
             identity,
-            f"Extracting {pdf_path.name} with Docling {mode}; {self.docling.mode_timeout_summary(force_full_page_ocr)}",
+            f"Extracting {pdf_path.name} with Docling {mode}; {self.docling.mode_timeout_summary(force_full_page_ocr, use_vlm)}",
         ):
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOCLING, "Run stopped before Docling extraction")
-        try:
-            result = self.docling.extract_pdf_text_result(
-                pdf_path,
-                docling_dir / result_dir_name(force_full_page_ocr),
-                force_full_page_ocr=force_full_page_ocr,
-            )
-        except DoclingExtractionError as exc:
-            if not force_full_page_ocr and self._full_page_retry_enabled():
-                self.store.log_event(
-                    run_id,
-                    "application_docling_default_failed",
-                    "docling",
-                    identity,
-                    f"Default Docling failed; retrying with full-page OCR; {self._full_page_ocr_summary()}; error={exc}",
-                )
-                return self._extract_docling_mode(run_id, identity, pdf_path, docling_dir, force_full_page_ocr=True)
-            raise
+        result = self.docling.extract_pdf_text_result(
+            pdf_path,
+            docling_dir / result_dir_name(force_full_page_ocr, use_vlm),
+            force_full_page_ocr=force_full_page_ocr,
+            use_vlm=use_vlm,
+        )
         self.store.log_event(
             run_id,
             "application_docling_text",
@@ -252,6 +280,11 @@ class ApplicationPipeline:
 
         return os.getenv("PCW_DOCLING_FULL_PAGE_RETRY", "1").strip().lower() not in {"0", "false", "no", "off"}
 
+    def _vlm_retry_enabled(self) -> bool:
+        """Purpose: allow operators to disable the heaviest Docling fallback."""
+
+        return os.getenv("PCW_DOCLING_VLM_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}
+
     def _full_page_ocr_summary(self) -> str:
         """Purpose: log retry settings without requiring test doubles to inherit state."""
 
@@ -263,6 +296,17 @@ class ApplicationPipeline:
                 pass
         return "backend=unknown, images_scale=unknown"
 
+    def _vlm_summary(self) -> str:
+        """Purpose: log VLM settings without requiring test doubles to inherit state."""
+
+        summary = getattr(self.docling, "vlm_summary", None)
+        if callable(summary):
+            try:
+                return str(summary())
+            except AttributeError:
+                pass
+        return "preset=unknown, images_scale=unknown, timeout_seconds=unknown"
+
     def _event_items(self, event_id: str) -> list[dict]:
         """Purpose: fetch Legistar event items once per run event."""
 
@@ -271,7 +315,9 @@ class ApplicationPipeline:
         return self._event_items_cache[event_id]
 
 
-def result_dir_name(force_full_page_ocr: bool) -> str:
+def result_dir_name(force_full_page_ocr: bool, use_vlm: bool = False) -> str:
     """Purpose: isolate default and full-page OCR sidecars in temp output."""
 
+    if use_vlm:
+        return "vlm"
     return "full_page_ocr" if force_full_page_ocr else "default"

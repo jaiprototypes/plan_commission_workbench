@@ -35,13 +35,20 @@ class DoclingTextExtractor:
 
         return self.extract_pdf_text_result(pdf_path, output_dir).text
 
-    def extract_pdf_text_result(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool = False) -> DoclingTextResult:
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+    ) -> DoclingTextResult:
         """Purpose: extract text and report whether default or OCR mode was used."""
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        mode = "full_page_ocr" if force_full_page_ocr else "default"
+        mode = self._mode_name(force_full_page_ocr, use_vlm)
         try:
-            text = self._extract_text(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
+            text = self._extract_text(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
         except Exception as exc:
             raise DoclingExtractionError(f"Docling {mode} failed for {pdf_path.name}: {exc}; {self._file_context(pdf_path)}") from exc
         if not text.strip():
@@ -50,32 +57,33 @@ class DoclingTextExtractor:
         sidecar.write_text(text, encoding="utf-8")
         return DoclingTextResult(text=text, mode=mode, output_path=sidecar)
 
-    def _extract_text(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+    def _extract_text(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
         """Purpose: run Docling in-process for tests or subprocess for hard timeouts."""
 
         if self.converter_factory:
-            return self._extract_text_inline(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
-        return self._extract_text_subprocess(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr)
+            return self._extract_text_inline(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
+        return self._extract_text_subprocess(pdf_path, output_dir, force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
 
-    def _extract_text_inline(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+    def _extract_text_inline(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
         """Purpose: run Docling directly when tests inject a fake converter."""
 
         os.environ.setdefault("DOCLING_CACHE_DIR", str(output_dir / "cache"))
-        converter = self._converter(force_full_page_ocr=force_full_page_ocr)
+        converter = self._converter(force_full_page_ocr=force_full_page_ocr, use_vlm=use_vlm)
         result = converter.convert(str(pdf_path))
         return self._result_text(result)
 
-    def _extract_text_subprocess(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool) -> str:
+    def _extract_text_subprocess(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
         """Purpose: isolate Docling so a hung converter can be timed out."""
 
-        mode = "full_page_ocr" if force_full_page_ocr else "default"
+        mode = self._mode_name(force_full_page_ocr, use_vlm)
         output_json = output_dir / f"{pdf_path.name}.{mode}.worker.json"
-        timeout_seconds = self._timeout_seconds(force_full_page_ocr)
-        command = self._worker_command(pdf_path, output_json, force_full_page_ocr)
+        timeout_seconds = self._timeout_seconds(force_full_page_ocr, use_vlm)
+        command = self._worker_command(pdf_path, output_json, force_full_page_ocr, use_vlm)
         env = os.environ.copy()
         env["DOCLING_CACHE_DIR"] = str(output_dir / "cache")
         env["PCW_DOCLING_FULL_PAGE_OCR_BACKEND"] = self.full_page_ocr_backend
         env["PCW_DOCLING_IMAGES_SCALE"] = str(self._images_scale())
+        env["PCW_DOCLING_VLM_PRESET"] = self._vlm_preset()
         try:
             completed = subprocess.run(command, capture_output=True, env=env, text=True, timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
@@ -92,7 +100,7 @@ class DoclingTextExtractor:
             raise DoclingExtractionError(f"Docling {mode} worker output did not contain text")
         return text
 
-    def _worker_command(self, pdf_path: Path, output_json: Path, force_full_page_ocr: bool) -> list[str]:
+    def _worker_command(self, pdf_path: Path, output_json: Path, force_full_page_ocr: bool, use_vlm: bool) -> list[str]:
         """Purpose: invoke the Docling worker in source or frozen desktop builds."""
 
         args = [
@@ -102,37 +110,46 @@ class DoclingTextExtractor:
             "--output-json",
             str(output_json),
             "--mode",
-            "full_page_ocr" if force_full_page_ocr else "default",
+            self._mode_name(force_full_page_ocr, use_vlm),
         ]
         if getattr(sys, "frozen", False):
             return [sys.executable, *args]
         return [sys.executable, "-m", "plan_commission_workbench.docling_worker", *args[1:]]
 
-    def _timeout_seconds(self, force_full_page_ocr: bool) -> float:
+    def _timeout_seconds(self, force_full_page_ocr: bool, use_vlm: bool = False) -> float:
         """Purpose: bound Docling work so retry logic can proceed."""
 
-        name = "PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS" if force_full_page_ocr else "PCW_DOCLING_TIMEOUT_SECONDS"
-        default = 600.0 if force_full_page_ocr else 120.0
+        if use_vlm:
+            name = "PCW_DOCLING_VLM_TIMEOUT_SECONDS"
+            default = 900.0
+        elif force_full_page_ocr:
+            name = "PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS"
+            default = 600.0
+        else:
+            name = "PCW_DOCLING_TIMEOUT_SECONDS"
+            default = 120.0
         try:
             value = float(os.getenv(name, str(default)))
         except ValueError:
             return default
         return max(10.0, value)
 
-    def _converter(self, *, force_full_page_ocr: bool = False) -> Any:
+    def _converter(self, *, force_full_page_ocr: bool = False, use_vlm: bool = False) -> Any:
         """Purpose: instantiate Docling lazily so tests can mock it."""
 
         if self.converter_factory:
-            return self._factory_converter(force_full_page_ocr)
+            return self._factory_converter(force_full_page_ocr, use_vlm)
         try:
             from docling.document_converter import DocumentConverter  # type: ignore
         except Exception as exc:
             raise DoclingExtractionError("Docling is not installed in this environment") from exc
+        if use_vlm:
+            return self._vlm_converter(DocumentConverter)
         if not force_full_page_ocr:
             return DocumentConverter()
         return self._full_page_ocr_converter(DocumentConverter)
 
-    def _factory_converter(self, force_full_page_ocr: bool) -> Any:
+    def _factory_converter(self, force_full_page_ocr: bool, use_vlm: bool) -> Any:
         """Purpose: support zero-arg and mode-aware converter test factories."""
 
         assert self.converter_factory is not None
@@ -141,8 +158,31 @@ class DoclingTextExtractor:
             parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in signature.parameters.values()
         ) or bool(signature.parameters)
         if accepts_mode:
-            return self.converter_factory("full_page_ocr" if force_full_page_ocr else "default")
+            return self.converter_factory(self._mode_name(force_full_page_ocr, use_vlm))
         return self.converter_factory()
+
+    def _vlm_converter(self, document_converter_cls: Any) -> Any:
+        """Purpose: configure Docling's VLM conversion fallback."""
+
+        try:
+            from docling.datamodel.base_models import InputFormat  # type: ignore
+            from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions  # type: ignore
+            from docling.document_converter import PdfFormatOption  # type: ignore
+            from docling.pipeline.vlm_pipeline import VlmPipeline  # type: ignore
+        except Exception as exc:
+            raise DoclingExtractionError("Docling VLM options are unavailable") from exc
+        pipeline_options = VlmPipelineOptions()
+        pipeline_options.document_timeout = self._timeout_seconds(False, use_vlm=True)
+        pipeline_options.images_scale = self._images_scale()
+        try:
+            pipeline_options.vlm_options = VlmConvertOptions.from_preset(self._vlm_preset())
+        except Exception as exc:
+            raise DoclingExtractionError(f"Docling VLM preset '{self._vlm_preset()}' is unavailable") from exc
+        return document_converter_cls(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_cls=VlmPipeline, pipeline_options=pipeline_options),
+            }
+        )
 
     def _full_page_ocr_converter(self, document_converter_cls: Any) -> Any:
         """Purpose: configure Docling's heavier full-page OCR path."""
@@ -203,11 +243,28 @@ class DoclingTextExtractor:
             f"timeout_seconds={self._timeout_seconds(True):g}"
         )
 
-    def mode_timeout_summary(self, force_full_page_ocr: bool) -> str:
+    def vlm_summary(self) -> str:
+        """Purpose: describe the configured VLM fallback in run logs."""
+
+        return f"preset={self._vlm_preset()}, images_scale={self._images_scale():g}, timeout_seconds={self._timeout_seconds(False, use_vlm=True):g}"
+
+    def mode_timeout_summary(self, force_full_page_ocr: bool, use_vlm: bool = False) -> str:
         """Purpose: describe Docling timeout settings in run logs."""
 
-        mode = "full_page_ocr" if force_full_page_ocr else "default"
-        return f"mode={mode}, timeout_seconds={self._timeout_seconds(force_full_page_ocr):g}"
+        mode = self._mode_name(force_full_page_ocr, use_vlm)
+        return f"mode={mode}, timeout_seconds={self._timeout_seconds(force_full_page_ocr, use_vlm):g}"
+
+    def _mode_name(self, force_full_page_ocr: bool, use_vlm: bool = False) -> str:
+        """Purpose: normalize Docling mode names across parent and worker."""
+
+        if use_vlm:
+            return "vlm"
+        return "full_page_ocr" if force_full_page_ocr else "default"
+
+    def _vlm_preset(self) -> str:
+        """Purpose: choose Docling's VLM preset for last-resort extraction."""
+
+        return os.getenv("PCW_DOCLING_VLM_PRESET", "granite_docling").strip() or "granite_docling"
 
     def _result_text(self, result: Any) -> str:
         """Purpose: support common Docling document export shapes."""

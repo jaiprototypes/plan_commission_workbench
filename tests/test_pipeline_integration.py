@@ -107,9 +107,16 @@ class FakeDocling(DoclingTextExtractor):
             Section 6. Signatures
             """
 
-    def extract_pdf_text_result(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool = False) -> DoclingTextResult:
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+    ) -> DoclingTextResult:
         text = self.extract_pdf_text(pdf_path, output_dir)
-        mode = "full_page_ocr" if force_full_page_ocr else "default"
+        mode = "vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default"
         return DoclingTextResult(text=text, mode=mode, output_path=output_dir / f"{pdf_path.name}.{mode}.docling.txt")
 
 
@@ -123,8 +130,15 @@ class RetryApplicationDocling(DoclingTextExtractor):
         super().__init__()
         self.modes: list[str] = []
 
-    def extract_pdf_text_result(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool = False) -> DoclingTextResult:
-        self.modes.append("full_page_ocr" if force_full_page_ocr else "default")
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+    ) -> DoclingTextResult:
+        self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
         output_dir.mkdir(parents=True, exist_ok=True)
         if pdf_path.name.startswith("agenda"):
             text = """
@@ -145,6 +159,43 @@ class RetryApplicationDocling(DoclingTextExtractor):
         Unit count 100
         """
         return DoclingTextResult(text=text, mode="full_page_ocr", output_path=output_dir / "app.full_page_ocr.docling.txt")
+
+
+class VlmApplicationDocling(RetryApplicationDocling):
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+    ) -> DoclingTextResult:
+        self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if pdf_path.name.startswith("agenda"):
+            return DoclingTextResult(
+                text="1. 88001 Conditional Use for a 100-unit apartment building\n2. 88002 Planning staff report",
+                mode="default",
+                output_path=output_dir / "agenda.default.docling.txt",
+            )
+        if not use_vlm:
+            mode = "full_page_ocr" if force_full_page_ocr else "default"
+            return DoclingTextResult(
+                text="Applicant Jane Applicant Project Construct 100 units",
+                mode=mode,
+                output_path=output_dir / f"app.{mode}.docling.txt",
+            )
+        text = """
+        Section 3. Applicant and Project Contact
+        Applicant name Jane Applicant
+        Applicant company Applicant LLC
+        Project contact person Pat Contact
+        Project contact email pat@example.com
+        Section 5. Project Information
+        Project description Construct 100 dwelling units.
+        Unit count 100
+        """
+        return DoclingTextResult(text=text, mode="vlm", output_path=output_dir / "app.vlm.docling.txt")
 
 
 def responder(_system: str, user: str):
@@ -281,4 +332,17 @@ def test_application_docling_retries_full_page_ocr_when_sections_are_missing(tmp
     assert result["status"] == statuses.COMPLETED
     assert docling.modes == ["default", "default", "full_page_ocr"]
     assert "application_docling_retry" in stages
+    assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1
+
+
+def test_application_docling_uses_vlm_after_default_and_ocr_miss_sections(tmp_path) -> None:
+    docling = VlmApplicationDocling()
+    workbench = make_workbench(tmp_path, docling)
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    stages = [event["stage"] for event in workbench.store.list_run_events(1)]
+
+    assert result["status"] == statuses.COMPLETED
+    assert docling.modes == ["default", "default", "full_page_ocr", "vlm"]
+    assert "application_docling_vlm_retry" in stages
     assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1

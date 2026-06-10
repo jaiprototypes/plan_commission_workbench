@@ -17,10 +17,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pcw-docling-worker")
     parser.add_argument("--pdf", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--mode", choices=("default", "full_page_ocr"), required=True)
+    parser.add_argument("--mode", choices=("default", "full_page_ocr", "vlm"), required=True)
     args = parser.parse_args(argv)
     try:
-        text = _convert(args.pdf, args.mode == "full_page_ocr")
+        text = _convert(args.pdf, args.mode)
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps({"text": text}), encoding="utf-8")
     except Exception:
@@ -29,11 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _convert(pdf_path: Path, force_full_page_ocr: bool) -> str:
+def _convert(pdf_path: Path, mode: str) -> str:
     """Purpose: use Docling directly inside the worker process."""
 
     extractor = DoclingTextExtractor()
-    converter = extractor._converter(force_full_page_ocr=force_full_page_ocr)
+    converter = extractor._converter(force_full_page_ocr=mode == "full_page_ocr", use_vlm=mode == "vlm")
     result = converter.convert(str(pdf_path))
     return extractor._result_text(result)
 
