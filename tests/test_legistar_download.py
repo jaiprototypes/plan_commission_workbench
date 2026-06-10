@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
-from plan_commission_workbench.docling_adapter import DoclingTextExtractor
+from plan_commission_workbench.docling_adapter import DoclingTextExtractor, WorkerMonitorState
 from plan_commission_workbench.exceptions import DoclingExtractionError, DownloadError
 from plan_commission_workbench.legistar import LegistarClient
 
@@ -212,6 +213,11 @@ def test_docling_subprocess_timeout_is_reported(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setenv("PCW_DOCLING_TIMEOUT_SECONDS", "10")
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", lambda *_args, **_kwargs: HangingProcess())
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.os.killpg", lambda *_args: (_ for _ in ()).throw(OSError("missing group")))
+    monkeypatch.setattr(
+        DoclingTextExtractor,
+        "_start_worker_monitor",
+        lambda *_args, **_kwargs: WorkerMonitorState(stop_event=threading.Event()),
+    )
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.sleep", lambda _seconds: None)
 
@@ -247,6 +253,11 @@ def test_docling_subprocess_reports_progress_while_worker_runs(monkeypatch: pyte
 
     monkeypatch.setenv("PCW_DOCLING_WORKER_PROGRESS_SECONDS", "5")
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", SlowSuccessProcess)
+    monkeypatch.setattr(
+        DoclingTextExtractor,
+        "_start_worker_monitor",
+        lambda *_args, **_kwargs: WorkerMonitorState(stop_event=threading.Event()),
+    )
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.sleep", lambda _seconds: None)
 
@@ -258,4 +269,31 @@ def test_docling_subprocess_reports_progress_while_worker_runs(monkeypatch: pyte
 
     assert result.text == "Section 3\nSection 5"
     assert any("worker PID 67890 started" in message for message in messages)
-    assert any("still running after 6s" in message for message in messages)
+
+
+def test_docling_monitor_logs_timeout_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RunningProcess:
+        """Purpose: mimic a worker that only the monitor can kill."""
+
+        pid = 24680
+
+        def poll(self):
+            return None
+
+    extractor = DoclingTextExtractor()
+    state = WorkerMonitorState(stop_event=threading.Event())
+    messages: list[str] = []
+
+    monkeypatch.setattr(extractor, "_kill_worker", lambda _process: "fake process-tree kill")
+
+    extractor._worker_monitor_loop(
+        RunningProcess(),
+        "default",
+        0.01,
+        lambda message: messages.append(message),
+        state,
+    )
+
+    assert any("timeout reached" in message for message in messages)
+    assert any("fake process-tree kill" in message for message in messages)
+    assert state.failure_message and "fake process-tree kill" in state.failure_message

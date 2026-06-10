@@ -10,6 +10,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable
 
@@ -23,6 +24,15 @@ class DoclingTextResult:
     text: str
     mode: str
     output_path: Path
+
+
+@dataclass
+class WorkerMonitorState:
+    """Purpose: share timeout monitor state back to the waiting parent."""
+
+    stop_event: threading.Event
+    failure_message: str | None = None
+    kill_detail: str | None = None
 
 
 ProgressCallback = Callable[[str], bool | None]
@@ -132,30 +142,33 @@ class DoclingTextExtractor:
         ):
             kill_detail = self._kill_worker(process)
             raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active; {kill_detail}")
+        monitor = self._start_worker_monitor(process, mode, timeout_seconds, progress_callback)
         start = time.monotonic()
         deadline = start + timeout_seconds
-        progress_interval = self._worker_progress_interval()
-        next_progress = start + progress_interval
-        while True:
-            return_code = process.poll()
-            if return_code is not None:
-                break
-            now = time.monotonic()
-            if now >= deadline:
-                kill_detail = self._kill_worker(process)
-                detail = self._worker_log_detail(stderr_log, stdout_log)
-                suffix = f"; {kill_detail}: {detail}" if detail else f"; {kill_detail}"
-                raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds{suffix}")
-            if now >= next_progress:
-                elapsed = int(now - start)
-                if not self._report_progress(
-                    progress_callback,
-                    f"Docling {mode} worker PID {process.pid} still running after {elapsed}s; timeout_seconds={timeout_seconds:g}",
-                ):
+        try:
+            while True:
+                return_code = process.poll()
+                if return_code is not None:
+                    break
+                now = time.monotonic()
+                if now >= deadline:
+                    elapsed = int(now - start)
+                    self._report_progress(
+                        progress_callback,
+                        f"Docling {mode} worker PID {process.pid} timeout reached after {elapsed}s; requesting process-tree cleanup",
+                    )
                     kill_detail = self._kill_worker(process)
-                    raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active; {kill_detail}")
-                next_progress = now + progress_interval
-            time.sleep(0.5)
+                    self._report_progress(progress_callback, f"Docling {mode} timeout cleanup result: {kill_detail}")
+                    detail = self._worker_log_detail(stderr_log, stdout_log)
+                    suffix = f"; {kill_detail}: {detail}" if detail else f"; {kill_detail}"
+                    raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds{suffix}")
+                time.sleep(0.5)
+        finally:
+            monitor.stop_event.set()
+        if monitor.failure_message:
+            detail = self._worker_log_detail(stderr_log, stdout_log)
+            suffix = f": {detail}" if detail else ""
+            raise DoclingExtractionError(f"{monitor.failure_message}{suffix}")
         if return_code != 0:
             detail = self._worker_log_detail(stderr_log, stdout_log)
             raise DoclingExtractionError(f"Docling {mode} worker exited {return_code}: {detail}")
@@ -203,6 +216,65 @@ class DoclingTextExtractor:
         except subprocess.TimeoutExpired:
             return f"{detail}; worker still present after kill wait"
         return detail
+
+    def _start_worker_monitor(
+        self,
+        process: subprocess.Popen,
+        mode: str,
+        timeout_seconds: float,
+        progress_callback: ProgressCallback | None,
+    ) -> WorkerMonitorState:
+        """Purpose: keep timeout logging alive even if the parent wait stalls."""
+
+        state = WorkerMonitorState(stop_event=threading.Event())
+        thread = threading.Thread(
+            target=self._worker_monitor_loop,
+            args=(process, mode, timeout_seconds, progress_callback, state),
+            name=f"pcw-docling-monitor-{process.pid}",
+            daemon=True,
+        )
+        thread.start()
+        return state
+
+    def _worker_monitor_loop(
+        self,
+        process: subprocess.Popen,
+        mode: str,
+        timeout_seconds: float,
+        progress_callback: ProgressCallback | None,
+        state: WorkerMonitorState,
+    ) -> None:
+        """Purpose: emit progress and force cleanup from a separate thread."""
+
+        start = time.monotonic()
+        deadline = start + timeout_seconds
+        next_progress = start + self._worker_progress_interval()
+        while not state.stop_event.is_set():
+            if process.poll() is not None:
+                return
+            now = time.monotonic()
+            if now >= deadline:
+                elapsed = int(now - start)
+                self._report_progress(
+                    progress_callback,
+                    f"Docling {mode} worker PID {process.pid} timeout reached after {elapsed}s; requesting process-tree cleanup",
+                )
+                state.kill_detail = self._kill_worker(process)
+                state.failure_message = f"Docling {mode} timed out after {timeout_seconds:g} seconds; {state.kill_detail}"
+                self._report_progress(progress_callback, state.failure_message)
+                return
+            if now >= next_progress:
+                elapsed = int(now - start)
+                if not self._report_progress(
+                    progress_callback,
+                    f"Docling {mode} worker PID {process.pid} still running after {elapsed}s; timeout_seconds={timeout_seconds:g}",
+                ):
+                    state.kill_detail = self._kill_worker(process)
+                    state.failure_message = f"Docling {mode} worker stopped because the run is no longer active; {state.kill_detail}"
+                    return
+                next_progress = now + self._worker_progress_interval()
+            wait_for = max(0.1, min(next_progress, deadline) - time.monotonic())
+            state.stop_event.wait(min(wait_for, 1.0))
 
     def _worker_process_group_kwargs(self) -> dict[str, Any]:
         """Purpose: isolate Docling so timeout cleanup can kill descendants."""
