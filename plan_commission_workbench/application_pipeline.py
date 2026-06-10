@@ -12,7 +12,7 @@ from .exceptions import DoclingExtractionError, DownloadError, LLMResponseError,
 from .legistar import LegistarClient
 from .llm import LLMJsonClient
 from .models import RunRequest
-from .segmentation import SectionClipper
+from .segmentation import SectionClipper, has_non_item_agenda_tail
 from .storage import ReviewStore
 
 
@@ -49,6 +49,8 @@ class ApplicationPipeline:
         """Purpose: process one agenda hit unless extraction already exists."""
 
         identity = f"agenda_item:{agenda_item['id']}"
+        if self._skip_contaminated_agenda_hit(run_id, agenda_item, identity):
+            return
         if self.store.application_complete(int(agenda_item["id"])):
             self.store.log_event(run_id, "application_skip", "application", identity, "Application already extracted or accepted")
             return
@@ -115,6 +117,17 @@ class ApplicationPipeline:
             self._extract_application(run_id, source_id, attachment, downloaded.path, run_tmp)
         finally:
             downloaded.path.unlink(missing_ok=True)
+
+    def _skip_contaminated_agenda_hit(self, run_id: int, agenda_item: dict, identity: str) -> bool:
+        """Purpose: block old hit rows polluted by agenda boilerplate."""
+
+        description = str(agenda_item.get("description") or "")
+        if not has_non_item_agenda_tail(description):
+            return False
+        reason = "Agenda item includes Secretary/closing boilerplate; re-run agenda classification before application extraction"
+        self.store.mark_agenda_needs_review(int(agenda_item["id"]), reason)
+        self.store.log_event(run_id, "application_skip_contaminated_agenda", "application", identity, reason)
+        return True
 
     def _extract_application(self, run_id: int, source_id: int, attachment, pdf_path: Path, run_tmp: Path) -> None:
         """Purpose: run Docling, clip Sections 3/5, and extract fields with LLM."""

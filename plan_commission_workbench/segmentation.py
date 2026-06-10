@@ -9,7 +9,17 @@ from typing import Any
 from .models import AgendaSegment
 
 ITEM_RE = re.compile(r"^\s*(?P<number>\d{1,3})[\.)]\s+(?P<ref>\d{4,})\s+(?P<desc>.+)$")
+NON_ITEM_TAIL_RE = re.compile(
+    r"\s*(?:#+\s*)?(?:Secretary's Report|Member Announcements(?:,\s*Communications or Business Items)?|Adjournment|Registrations)\b.*$",
+    re.IGNORECASE,
+)
 SPACE_RE = re.compile(r"\s+")
+
+
+def has_non_item_agenda_tail(text: str) -> bool:
+    """Purpose: detect agenda boilerplate accidentally merged into an item."""
+
+    return bool(NON_ITEM_TAIL_RE.search(text))
 
 
 class AgendaSegmenter:
@@ -70,7 +80,8 @@ class AgendaSegmenter:
         event_item = by_ref.get(ref, {})
         city_item_id = str(event_item.get("EventItemMatterId") or ref).strip()
         file_id = str(event_item.get("EventItemMatterFile") or ref).strip() or None
-        description = self._clean(" ".join(desc_parts) or event_item.get("EventItemMatterName") or "")
+        raw_description = " ".join(desc_parts) or event_item.get("EventItemMatterName") or ""
+        description = self._clean(self._trim_non_item_tail(raw_description))
         if description:
             segments.append(AgendaSegment(event_id, city_item_id, file_id, meeting_date, description))
 
@@ -115,6 +126,11 @@ class AgendaSegmenter:
         """Purpose: normalize OCR/Docling whitespace."""
 
         return SPACE_RE.sub(" ", text).strip()
+
+    def _trim_non_item_tail(self, text: str) -> str:
+        """Purpose: stop final agenda items before staff report boilerplate."""
+
+        return NON_ITEM_TAIL_RE.sub("", text)
 
 
 class SectionClipper:

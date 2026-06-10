@@ -57,6 +57,34 @@ def test_agenda_segmenter_keeps_event_item_when_docling_text_omits_it() -> None:
     assert segments[0].description == "Construct 100-unit apartment building"
 
 
+def test_agenda_segmenter_trims_secretary_report_from_final_item() -> None:
+    text = """
+    13. 90019 Approving a Certified Survey Map of property owned by the Madison Metropolitan Sewerage District located at 1201-1241 Moorland Road (District 14).
+    ## Secretary's Report ## - Upcoming Matters - ID 90537 & 90127 - Create one lot for future mixed-use development in CC-T zoning.
+    ## Adjournment ##
+    """
+    event_items = [
+        {
+            "EventItemMatterId": "98914",
+            "EventItemMatterFile": "90019",
+            "EventItemMatterName": "Approving a Certified Survey Map",
+        }
+    ]
+
+    segments = AgendaSegmenter().segment(
+        text,
+        event_id="27921",
+        meeting_date=dt.date(2025, 11, 3),
+        event_items=event_items,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].city_item_id == "98914"
+    assert "Certified Survey Map" in segments[0].description
+    assert "Secretary" not in segments[0].description
+    assert "mixed-use" not in segments[0].description
+
+
 def test_section_clipper_returns_only_sections_3_and_5() -> None:
     text = """
     Section 2. Property

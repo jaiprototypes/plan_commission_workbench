@@ -620,6 +620,20 @@ class ReviewStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def mark_agenda_needs_review(self, agenda_item_id: int, reason: str) -> bool:
+        """Purpose: keep invalid historical hit rows from enqueueing applications."""
+
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """
+                UPDATE agenda_items
+                SET classification = ?, confidence = 0, reason = ?, evidence_snippet = ?, updated_at = ?
+                WHERE id = ? AND classification = ?
+                """,
+                (statuses.NEEDS_AGENDA_REVIEW, reason, reason[:240], _now(), agenda_item_id, statuses.AGENDA_HIT),
+            )
+            return bool(cur.rowcount)
+
     def application_complete(self, agenda_item_id: int, source_url: str | None = None, attachment_id: str | None = None) -> bool:
         """Purpose: decide whether application Docling and LLM work can be skipped."""
 

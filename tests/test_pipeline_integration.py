@@ -5,11 +5,12 @@ import hashlib
 from pathlib import Path
 
 from plan_commission_workbench import statuses
+from plan_commission_workbench.application_pipeline import ApplicationPipeline
 from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.docling_adapter import DoclingTextExtractor, DoclingTextResult
 from plan_commission_workbench.exceptions import DoclingExtractionError
 from plan_commission_workbench.llm import LLMJsonClient
-from plan_commission_workbench.models import DownloadedFile, EventRecord
+from plan_commission_workbench.models import AgendaClassification, AgendaSegment, DownloadedFile, EventRecord, RunRequest
 from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench.storage import ReviewStore
 
@@ -336,6 +337,48 @@ def test_docling_failure_stops_run_and_cleans_temp_files(tmp_path) -> None:
     assert result["status"] == statuses.FAILED_AGENDA_DOCLING
     assert "docling exploded" in result["last_error"]
     assert not (tmp_path / "data" / "tmp" / "run_1").exists()
+
+
+def test_application_queue_skips_contaminated_historical_agenda_hit(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = FakeLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2025, 11, 3), dt.date(2025, 11, 3), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27921",
+        file_id="90019",
+        attachment_id=None,
+        source_url="https://example.test/agenda-27921.pdf",
+        content_hash="agenda-27921",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = workbench.store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(
+            "27921",
+            "98914",
+            "90019",
+            dt.date(2025, 11, 3),
+            "Approving a Certified Survey Map. ## Secretary's Report ## Upcoming Matters include future mixed-use development.",
+        ),
+        AgendaClassification("98914", statuses.AGENDA_HIT, 1.0, "Mixed-use text", "future mixed-use development"),
+    )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2025, 11, 3), dt.date(2025, 11, 3)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    reviewed = [item for item in workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW) if item["id"] == agenda_id][0]
+    events = workbench.store.list_run_events(run_id)
+    assert reviewed["classification"] == statuses.NEEDS_AGENDA_REVIEW
+    assert legistar.downloads == 0
+    assert docling.calls == 0
+    assert any(event["stage"] == "application_skip_contaminated_agenda" for event in events)
 
 
 def test_application_docling_retries_full_page_ocr_when_sections_are_missing(tmp_path) -> None:
