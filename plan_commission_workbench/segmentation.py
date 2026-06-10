@@ -23,6 +23,12 @@ def has_non_item_agenda_tail(text: str) -> bool:
     return bool(NON_ITEM_TAIL_RE.search(text))
 
 
+def trim_non_item_tail(text: str) -> str:
+    """Purpose: remove agenda boilerplate from a merged project description."""
+
+    return NON_ITEM_TAIL_RE.sub("", text)
+
+
 def is_non_action_agenda_item(text: str) -> bool:
     """Purpose: identify agenda rows that are not project applications."""
 
@@ -88,7 +94,7 @@ class AgendaSegmenter:
         city_item_id = str(event_item.get("EventItemMatterId") or ref).strip()
         file_id = str(event_item.get("EventItemMatterFile") or ref).strip() or None
         raw_description = " ".join(desc_parts) or event_item.get("EventItemMatterName") or ""
-        description = self._clean(self._trim_non_item_tail(raw_description))
+        description = self._clean(trim_non_item_tail(raw_description))
         if description:
             segments.append(AgendaSegment(event_id, city_item_id, file_id, meeting_date, description))
 
@@ -106,7 +112,7 @@ class AgendaSegmenter:
             city_item_id = str(item.get("EventItemMatterId") or "").strip()
             if not city_item_id or city_item_id in by_city:
                 continue
-            description = self._clean(str(item.get("EventItemMatterName") or ""))
+            description = self._clean(trim_non_item_tail(str(item.get("EventItemMatterName") or "")))
             if not description:
                 continue
             by_city[city_item_id] = AgendaSegment(
@@ -133,12 +139,6 @@ class AgendaSegmenter:
         """Purpose: normalize OCR/Docling whitespace."""
 
         return SPACE_RE.sub(" ", text).strip()
-
-    def _trim_non_item_tail(self, text: str) -> str:
-        """Purpose: stop final agenda items before staff report boilerplate."""
-
-        return NON_ITEM_TAIL_RE.sub("", text)
-
 
 class SectionClipper:
     """Purpose: limit application LLM input to standardized Sections 3 and 5."""

@@ -416,6 +416,76 @@ def test_startup_migration_downgrades_public_comment_hits_and_counters(tmp_path)
     assert reopened.list_agenda_items(statuses.NOT_TARGET_PROJECT)[0]["city_item_id"] == "71173"
 
 
+def test_agenda_review_approval_unsticks_related_clean_application(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 5, 11), dt.date(2026, 5, 11), None)
+    agenda_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="28718",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.NEEDS_AGENDA_REVIEW,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        agenda_source,
+        AgendaSegment(
+            "28718",
+            "100058",
+            "91511",
+            dt.date(2026, 5, 11),
+            "Outdoor recreation to serve a 493-unit multi-family dwelling. ## Secretary's Report ## Upcoming Matters",
+        ),
+        AgendaClassification("100058", statuses.NEEDS_AGENDA_REVIEW, 0, "Boilerplate tail", "Secretary's Report"),
+    )
+    app_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="28718",
+        file_id="91511",
+        attachment_id="179990",
+        source_url="https://example.test/application.pdf",
+        content_hash="app-hash",
+        processing_status=statuses.NEEDS_OPERATOR_REVIEW,
+    )
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url="https://example.test/application.pdf",
+            attachment_id="179990",
+            applicant=ContactFields(
+                name="Joey Wisniewski",
+                company="New Land Enterprises",
+                mailing_address="1840A N. Farwell Ave, Milwaukee, WI 53202",
+            ),
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="493-unit multi-family dwelling.",
+            unit_count=493,
+            status=statuses.NEEDS_OPERATOR_REVIEW,
+            target_project=True,
+        ),
+    )
+
+    assert "Agenda item is not currently classified as a hit" in store.list_application_extractions()[0]["quality_issues"]
+
+    reviewed = store.review_agenda_item(agenda_id, statuses.AGENDA_HIT)
+    app_row = store.list_application_extractions(statuses.APPLICATION_EXTRACTED)[0]
+
+    assert reviewed["classification"] == statuses.AGENDA_HIT
+    assert "Secretary" not in reviewed["description"]
+    assert app_row["id"] == extraction_id
+    assert app_row["quality_issues"] == []
+    store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
+    assert store.list_application_extractions(statuses.ACCEPTED)[0]["id"] == extraction_id
+
+
 def test_review_acceptance_rejects_uncertain_or_unmailable_rows(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()

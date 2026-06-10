@@ -171,6 +171,12 @@ button.danger {
   background: var(--red);
 }
 
+.compact-button {
+  font-size: 13px;
+  min-height: 30px;
+  padding: 5px 8px;
+}
+
 .status-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -198,6 +204,13 @@ button.danger {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 170px;
 }
 
 table {

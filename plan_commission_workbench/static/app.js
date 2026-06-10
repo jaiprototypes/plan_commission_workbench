@@ -175,8 +175,35 @@ async function loadAgenda() {
       <td>${Number(row.confidence || 0).toFixed(2)}</td>
       <td>${escapeHtml(row.description)}</td>
       <td>${escapeHtml(row.reason)}</td>
+      <td>${agendaActions(row)}</td>
     </tr>
   `).join("");
+  body.querySelectorAll("[data-agenda-review]").forEach((button) => {
+    button.addEventListener("click", () => reviewAgendaItem(button.dataset.agendaReview, button.dataset.classification).catch(alert));
+  });
+}
+
+function agendaActions(row) {
+  const buttons = [];
+  if (row.classification !== "agenda_hit") {
+    buttons.push(`<button class="secondary compact-button" data-agenda-review="${row.id}" data-classification="agenda_hit" type="button">Hit</button>`);
+  }
+  if (row.classification !== "not_target_project") {
+    buttons.push(`<button class="secondary compact-button" data-agenda-review="${row.id}" data-classification="not_target_project" type="button">Not target</button>`);
+  }
+  if (row.classification !== "needs_agenda_review") {
+    buttons.push(`<button class="secondary compact-button" data-agenda-review="${row.id}" data-classification="needs_agenda_review" type="button">Review</button>`);
+  }
+  return `<div class="table-actions">${buttons.join("")}</div>`;
+}
+
+async function reviewAgendaItem(id, classification) {
+  await getJson(`/agenda-items/${id}/review`, {
+    method: "PATCH",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({classification}),
+  });
+  await loadAgenda();
 }
 
 function contactBlock(title, prefix, row) {

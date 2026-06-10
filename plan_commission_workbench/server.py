@@ -33,6 +33,11 @@ class ReviewRequest(BaseModel):
     notes: str | None = None
 
 
+class AgendaReviewRequest(BaseModel):
+    classification: str
+    reason: str | None = None
+
+
 class ExportRequest(BaseModel):
     output: str = "data/exports/madison_review.xlsx"
     status: str = statuses.ACCEPTED
@@ -139,6 +144,15 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
     @app.get("/agenda-items")
     def agenda_items(status: str | None = Query(default=None)) -> list[dict[str, Any]]:
         return workbench.store.list_agenda_items(status)
+
+    @app.patch("/agenda-items/{agenda_item_id}/review")
+    def review_agenda_item(agenda_item_id: int, payload: AgendaReviewRequest) -> dict[str, Any]:
+        try:
+            return workbench.store.review_agenda_item(agenda_item_id, payload.classification, payload.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/application-extractions")
     def application_extractions(status: str | None = Query(default=None)) -> list[dict[str, Any]]:

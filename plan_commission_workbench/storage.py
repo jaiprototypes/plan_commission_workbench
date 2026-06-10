@@ -14,6 +14,7 @@ from typing import Any, Iterable
 from . import statuses
 from .models import AgendaClassification, AgendaSegment, ApplicationExtraction, FieldEvidence
 from .quality import CONTACT_PREFIXES, application_quality_issues, contact_key, mailable_contact
+from .segmentation import trim_non_item_tail
 
 
 def _now() -> str:
@@ -160,6 +161,22 @@ class ReviewStore:
             """,
             (statuses.NOT_TARGET_PROJECT, reason, reason[:240], _now(), statuses.AGENDA_HIT),
         )
+        rows = conn.execute(
+            """
+            SELECT id, description FROM agenda_items
+            WHERE description LIKE '%Secretary''s Report%'
+               OR description LIKE '%Member Announcements%'
+               OR description LIKE '%Adjournment%'
+               OR description LIKE '%Registrations%'
+            """
+        ).fetchall()
+        for row in rows:
+            trimmed = trim_non_item_tail(str(row["description"] or "")).strip()
+            if trimmed and trimmed != row["description"]:
+                conn.execute(
+                    "UPDATE agenda_items SET description = ?, updated_at = ? WHERE id = ?",
+                    (trimmed, _now(), row["id"]),
+                )
 
     def _normalize_stored_application_statuses(self, conn: sqlite3.Connection) -> None:
         """Purpose: migrate older optimistic extraction statuses into review queues."""
@@ -763,6 +780,60 @@ class ReviewStore:
                 (statuses.NOT_TARGET_PROJECT, reason, reason[:240], _now(), agenda_item_id, statuses.AGENDA_HIT),
             )
             return bool(cur.rowcount)
+
+    def review_agenda_item(self, agenda_item_id: int, classification: str, reason: str | None = None) -> dict[str, Any]:
+        """Purpose: let operators promote or reject agenda rows after review."""
+
+        if classification not in statuses.AGENDA_FINAL_STATUSES:
+            raise ValueError(f"Unsupported agenda classification: {classification}")
+        message = reason or self._agenda_review_reason(classification)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM agenda_items WHERE id = ?", (agenda_item_id,)).fetchone()
+            if not row:
+                raise KeyError(f"Agenda item {agenda_item_id} not found")
+            description = trim_non_item_tail(str(row["description"] or "")).strip() or str(row["description"] or "")
+            confidence = 1.0 if classification != statuses.NEEDS_AGENDA_REVIEW else 0.0
+            conn.execute(
+                """
+                UPDATE agenda_items
+                SET classification = ?, confidence = ?, reason = ?, evidence_snippet = ?, description = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (classification, confidence, message, message[:240], description, _now(), agenda_item_id),
+            )
+            self._promote_clean_related_applications(conn, agenda_item_id)
+            self._refresh_all_run_counters(conn)
+            updated = conn.execute("SELECT * FROM agenda_items WHERE id = ?", (agenda_item_id,)).fetchone()
+            return dict(updated)
+
+    def _agenda_review_reason(self, classification: str) -> str:
+        """Purpose: write clear audit text for manual agenda decisions."""
+
+        if classification == statuses.AGENDA_HIT:
+            return "Operator approved agenda item as target project"
+        if classification == statuses.NOT_TARGET_PROJECT:
+            return "Operator marked agenda item as not a target project"
+        return "Operator left agenda item for agenda review"
+
+    def _promote_clean_related_applications(self, conn: sqlite3.Connection, agenda_item_id: int) -> None:
+        """Purpose: unstick application rows whose only QC issue was agenda status."""
+
+        rows = conn.execute(
+            """
+            SELECT app.*, agenda.classification AS agenda_classification
+            FROM application_extractions app
+            JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+            WHERE app.agenda_item_id = ? AND app.status = ?
+            """,
+            (agenda_item_id, statuses.NEEDS_OPERATOR_REVIEW),
+        ).fetchall()
+        for raw in rows:
+            row = dict(raw)
+            if not application_quality_issues(row):
+                conn.execute(
+                    "UPDATE application_extractions SET status = ?, updated_at = ? WHERE id = ?",
+                    (statuses.APPLICATION_EXTRACTED, _now(), row["id"]),
+                )
 
     def application_complete(self, agenda_item_id: int, source_url: str | None = None, attachment_id: str | None = None) -> bool:
         """Purpose: decide whether application Docling and LLM work can be skipped."""

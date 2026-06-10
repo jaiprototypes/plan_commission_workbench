@@ -85,6 +85,30 @@ def test_agenda_segmenter_trims_secretary_report_from_final_item() -> None:
     assert "mixed-use" not in segments[0].description
 
 
+def test_agenda_segmenter_trims_secretary_report_from_event_item_metadata() -> None:
+    event_items = [
+        {
+            "EventItemMatterId": "100058",
+            "EventItemMatterFile": "91511",
+            "EventItemMatterName": (
+                "Outdoor recreation pool to serve a seven-story, 493-unit multi-family dwelling. "
+                "## Member Announcements, Communications or Business Items ## Secretary's Report ## Upcoming Matters"
+            ),
+        }
+    ]
+
+    segments = AgendaSegmenter().segment(
+        "No numbered rows survived extraction",
+        event_id="28718",
+        meeting_date=dt.date(2026, 5, 11),
+        event_items=event_items,
+    )
+
+    assert segments[0].city_item_id == "100058"
+    assert "493-unit multi-family dwelling" in segments[0].description
+    assert "Secretary" not in segments[0].description
+
+
 def test_public_comment_period_is_non_action_agenda_item() -> None:
     assert is_non_action_agenda_item("Plan Commission Public Comment Period")
     assert not is_non_action_agenda_item("Consideration of a conditional use for 100 apartments")

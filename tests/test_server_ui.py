@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import os
+import datetime as dt
 import zipfile
 
 from fastapi.testclient import TestClient
 
 from plan_commission_workbench import statuses
 from plan_commission_workbench.api import PlanCommissionWorkbench
+from plan_commission_workbench.models import AgendaClassification, AgendaSegment
+from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench.server import PACKAGE_ROOT, create_app
+from plan_commission_workbench.storage import ReviewStore
 
 
 def test_ui_pages_render_without_template_errors() -> None:
@@ -45,6 +49,14 @@ def test_run_js_can_download_state_bundle() -> None:
     assert "download_url" in script
 
 
+def test_agenda_js_exposes_review_actions() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "reviewAgendaItem" in script
+    assert "/agenda-items/${id}/review" in script
+    assert "data-agenda-review" in script
+
+
 def test_state_bundle_endpoint_returns_zip(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
     client = TestClient(create_app(start_watchdog=False))
@@ -60,6 +72,37 @@ def test_state_bundle_endpoint_returns_zip(monkeypatch, tmp_path) -> None:
     with zipfile.ZipFile(zip_path) as archive:
         assert "workbench.db" in archive.namelist()
         assert "manifest.json" in archive.namelist()
+
+
+def test_agenda_review_endpoint_updates_classification(monkeypatch, tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("PCW_DATA_DIR", str(data_dir))
+    runtime = WorkbenchRuntime(data_dir=data_dir)
+    store = ReviewStore(runtime.db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 5, 11), dt.date(2026, 5, 11), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="28718",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.NEEDS_AGENDA_REVIEW,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("28718", "100058", "91511", dt.date(2026, 5, 11), "493-unit multi-family dwelling"),
+        AgendaClassification("100058", statuses.NEEDS_AGENDA_REVIEW, 0, "Needs review", "493-unit"),
+    )
+    client = TestClient(create_app(start_watchdog=False))
+
+    response = client.patch(f"/agenda-items/{agenda_id}/review", json={"classification": statuses.AGENDA_HIT})
+
+    assert response.status_code == 200
+    assert response.json()["classification"] == statuses.AGENDA_HIT
 
 
 def test_server_can_set_openai_key_for_current_process(monkeypatch) -> None:
