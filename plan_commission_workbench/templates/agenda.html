@@ -3,17 +3,23 @@
 <section class="panel">
   <div class="panel-head">
     <h1>Agenda</h1>
-    <select id="agenda-status">
-      <option value="">All</option>
-      <option value="agenda_hit">Hits</option>
-      <option value="not_target_project">Not target</option>
-      <option value="needs_agenda_review">Needs review</option>
-    </select>
+    <div class="panel-controls">
+      <select id="agenda-status">
+        <option value="">All</option>
+        <option value="agenda_hit">Hits</option>
+        <option value="not_target_project">Not target</option>
+        <option value="needs_agenda_review">Needs review</option>
+      </select>
+      <label class="inline-toggle">
+        <input id="agenda-hide-not-target" type="checkbox" checked>
+        Hide not target
+      </label>
+    </div>
   </div>
   <div class="table-wrap">
     <table class="agenda-table">
       <thead>
-        <tr><th>Date</th><th>Event</th><th>Item</th><th>Status</th><th>Confidence</th><th>Description</th><th>Reason</th><th>Actions</th></tr>
+        <tr><th>Date</th><th>Event</th><th>Item</th><th>Status</th><th>Conf.</th><th>Description</th><th>Reason</th><th>Actions</th></tr>
       </thead>
       <tbody id="agenda-body"></tbody>
     </table>

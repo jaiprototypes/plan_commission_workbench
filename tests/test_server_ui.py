@@ -73,10 +73,40 @@ def test_agenda_table_uses_compact_description_cells() -> None:
     styles = (PACKAGE_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
 
     assert "agenda-table" in template
+    assert "<th>Conf.</th>" in template
     assert "agenda-description" in script
     assert "agenda-text-box" in script
     assert ".agenda-table" in styles
     assert "table-layout: fixed" in styles
+    assert "white-space: nowrap" in styles
+
+
+def test_agenda_ui_can_hide_not_target_rows() -> None:
+    template = (PACKAGE_ROOT / "templates" / "agenda.html").read_text(encoding="utf-8")
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "agenda-hide-not-target" in template
+    assert "agendaRowsForDisplay" in script
+    assert 'status === "not_target_project"' in script
+    assert 'row.classification !== "not_target_project"' in script
+
+
+def test_ui_formats_visible_dates_as_month_day_year() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "function formatDate" in script
+    assert "${month}/${day}/${year}" in script
+    assert "formatDate(row.date_from)" in script
+    assert "formatDate(row.meeting_date)" in script
+
+
+def test_review_cards_use_compact_professional_spacing() -> None:
+    styles = (PACKAGE_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert ".card-head strong" in styles
+    assert "font-size: 11px" in styles
+    assert ".review-actions textarea" in styles
+    assert "min-height: 58px" in styles
 
 
 def test_review_js_downloads_workbook_exports() -> None:

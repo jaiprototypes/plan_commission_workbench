@@ -77,9 +77,35 @@ body {
 .panel-head {
   align-items: center;
   display: flex;
-  gap: 12px;
+  gap: 16px;
   justify-content: space-between;
   margin-bottom: 14px;
+}
+
+.panel-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.panel-controls > select {
+  min-width: 160px;
+  width: auto;
+}
+
+.inline-toggle {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.inline-toggle input {
+  min-height: 0;
+  width: auto;
 }
 
 .panel-actions {
@@ -236,29 +262,30 @@ table {
 .agenda-table th,
 .agenda-table td {
   font-size: 13px;
-  padding: 7px 6px;
+  padding: 7px 8px;
 }
 
 .agenda-table th:nth-child(1),
 .agenda-table td:nth-child(1) {
-  width: 92px;
+  width: 98px;
 }
 
 .agenda-table th:nth-child(2),
 .agenda-table td:nth-child(2),
 .agenda-table th:nth-child(3),
 .agenda-table td:nth-child(3) {
-  width: 72px;
+  width: 74px;
 }
 
 .agenda-table th:nth-child(4),
 .agenda-table td:nth-child(4) {
-  width: 120px;
+  overflow-wrap: anywhere;
+  width: 128px;
 }
 
 .agenda-table th:nth-child(5),
 .agenda-table td:nth-child(5) {
-  width: 78px;
+  width: 58px;
 }
 
 .agenda-table th:nth-child(8),
@@ -305,7 +332,9 @@ th {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.15;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .log {
@@ -330,13 +359,14 @@ th {
 
 .cards {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .card {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 11px 12px;
 }
 
 .card-warning {
@@ -348,12 +378,17 @@ th {
   display: flex;
   gap: 10px;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 9px;
+}
+
+.card-head strong {
+  font-size: 14px;
+  line-height: 1.25;
 }
 
 .fields {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -362,23 +397,30 @@ th {
 }
 
 .field-block h3 {
-  font-size: 13px;
-  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  margin: 0 0 4px;
   text-transform: uppercase;
 }
 
 .field-block p,
 .evidence p {
-  margin: 2px 0;
+  line-height: 1.32;
+  margin: 1px 0;
   overflow-wrap: anywhere;
+}
+
+.evidence {
+  margin-top: 8px;
 }
 
 .notice {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  font-size: 13px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin: 0 0 9px;
+  padding: 8px 10px;
 }
 
 .notice strong {
@@ -444,9 +486,18 @@ th {
 .review-actions {
   align-items: stretch;
   display: grid;
-  gap: 10px;
+  gap: 8px;
   grid-template-columns: minmax(240px, 1fr) minmax(180px, 0.5fr) auto auto;
-  margin-top: 12px;
+  margin-top: 10px;
+}
+
+.review-actions input,
+.review-actions button {
+  min-height: 34px;
+}
+
+.review-actions textarea {
+  min-height: 58px;
 }
 
 @media (max-width: 850px) {

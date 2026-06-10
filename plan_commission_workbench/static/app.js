@@ -15,6 +15,14 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function formatDate(value) {
+  // Purpose: keep API dates ISO while presenting dates in US desktop format.
+  const match = String(value ?? "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return value ?? "";
+  const [, year, month, day] = match;
+  return `${month}/${day}/${year}`;
+}
+
 async function getJson(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -77,7 +85,7 @@ async function loadRuns() {
   body.innerHTML = rows.map((row) => `
     <tr class="${String(row.id) === selectedRunId ? "selected-row" : ""}">
       <td>${row.id}</td>
-      <td>${escapeHtml(row.date_from)} to ${escapeHtml(row.date_to)}</td>
+      <td>${escapeHtml(formatDate(row.date_from))} to ${escapeHtml(formatDate(row.date_to))}</td>
       <td class="${statusClass(row.status)}">${escapeHtml(row.status)}</td>
       <td>${row.agenda_hits || 0}/${row.agenda_total || 0}</td>
       <td>${row.applications_extracted || 0}/${row.applications_total || 0}</td>
@@ -165,11 +173,13 @@ async function loadAgenda() {
   const body = $("#agenda-body");
   if (!body) return;
   const status = $("#agenda-status")?.value || "";
+  const hideNotTarget = $("#agenda-hide-not-target")?.checked ?? true;
   const focusedAgendaId = new URLSearchParams(window.location.search).get("item");
   const rows = await getJson(`/agenda-items${status ? `?status=${encodeURIComponent(status)}` : ""}`);
-  body.innerHTML = rows.map((row) => `
+  const displayRows = agendaRowsForDisplay(rows, status, hideNotTarget);
+  body.innerHTML = displayRows.map((row) => `
     <tr class="${String(row.id) === focusedAgendaId ? "selected-row agenda-focus-row" : ""}" data-agenda-id="${row.id}">
-      <td>${escapeHtml(row.meeting_date)}</td>
+      <td>${escapeHtml(formatDate(row.meeting_date))}</td>
       <td>${escapeHtml(row.event_id)}</td>
       <td>${escapeHtml(row.city_item_id)}</td>
       <td class="${statusClass(row.classification)}">${escapeHtml(row.classification)}</td>
@@ -183,6 +193,12 @@ async function loadAgenda() {
     button.addEventListener("click", () => reviewAgendaItem(button.dataset.agendaReview, button.dataset.classification).catch(alert));
   });
   scrollToFocusedAgendaRow(body, focusedAgendaId);
+}
+
+function agendaRowsForDisplay(rows, status, hideNotTarget) {
+  // Purpose: keep not-target rows available without letting them dominate the default agenda view.
+  if (!hideNotTarget || status === "not_target_project") return rows;
+  return rows.filter((row) => row.classification !== "not_target_project");
 }
 
 function scrollToFocusedAgendaRow(body, focusedAgendaId) {
@@ -305,7 +321,7 @@ function applicationCard(row, review = false) {
   return `
     <article class="card ${qualityIssues(row).length ? "card-warning" : ""}">
       <div class="card-head">
-        <strong>${escapeHtml(row.meeting_date)} | ${agendaItem}</strong>
+        <strong>${escapeHtml(formatDate(row.meeting_date))} | ${agendaItem}</strong>
         <span class="${statusClass(row.status, row)}">${escapeHtml(row.status)}</span>
       </div>
       ${warnings}
@@ -429,6 +445,7 @@ if (page === "run") setupRunPage();
 if (page === "agenda") {
   loadAgenda().catch(console.error);
   $("#agenda-status")?.addEventListener("change", () => loadAgenda().catch(console.error));
+  $("#agenda-hide-not-target")?.addEventListener("change", () => loadAgenda().catch(console.error));
 }
 if (page === "applications") {
   loadApplications().catch(console.error);
