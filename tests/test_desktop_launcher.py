@@ -56,6 +56,7 @@ def test_windows_build_explicitly_bundles_server_module() -> None:
     script = script_path.read_text(encoding="utf-8")
 
     assert '--hidden-import "plan_commission_workbench.docling_worker"' in script
+    assert '--hidden-import "plan_commission_workbench.run_worker"' in script
     assert '--hidden-import "plan_commission_workbench.server"' in script
     assert '--collect-all "docling_parse"' in script
     assert '--collect-all "pypdfium2_raw"' in script

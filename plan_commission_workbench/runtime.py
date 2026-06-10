@@ -21,13 +21,14 @@ class WorkbenchRuntime:
         self.export_dir = self.data_dir / "exports"
         self.cache_dir = self.data_dir / "cache"
         self.diagnostics_dir = self.data_dir / "diagnostics"
+        self.run_log_dir = self.data_dir / "run_logs"
         self.server_log_path = self.data_dir / "server.log"
         self.server_error_log_path = self.data_dir / "server.err.log"
 
     def setup(self) -> None:
         """Purpose: create local folders and configure low-noise logging."""
 
-        for path in (self.data_dir, self.tmp_dir, self.export_dir, self.cache_dir, self.diagnostics_dir):
+        for path in (self.data_dir, self.tmp_dir, self.export_dir, self.cache_dir, self.diagnostics_dir, self.run_log_dir):
             path.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(level=os.getenv("PCW_LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s")
 
@@ -42,3 +43,8 @@ class WorkbenchRuntime:
         """Purpose: remove downloaded PDFs and Docling output after a run."""
 
         shutil.rmtree(self.tmp_dir / f"run_{run_id}", ignore_errors=True)
+
+    def run_worker_log_paths(self, run_id: int) -> tuple[Path, Path]:
+        """Purpose: preserve child scrape logs across server restarts."""
+
+        return self.run_log_dir / f"run_{run_id}.log", self.run_log_dir / f"run_{run_id}.err.log"

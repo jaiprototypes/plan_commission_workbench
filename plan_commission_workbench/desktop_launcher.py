@@ -288,6 +288,12 @@ def main() -> None:
 
         index = sys.argv.index("--docling-worker")
         raise SystemExit(worker_main(sys.argv[index + 1 :]))
+    if "--run-worker" in sys.argv:
+        configure_desktop_environment()
+        from plan_commission_workbench.run_worker import main as run_worker_main
+
+        index = sys.argv.index("--run-worker")
+        raise SystemExit(run_worker_main(sys.argv[index + 1 :]))
     if "--self-test-docling" in sys.argv:
         raise SystemExit(run_docling_self_test())
     DesktopLauncher().run()

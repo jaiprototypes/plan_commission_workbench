@@ -5,6 +5,8 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
+from plan_commission_workbench import statuses
+from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.server import PACKAGE_ROOT, create_app
 
 
@@ -75,3 +77,23 @@ def test_server_can_set_openai_key_for_current_process(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["api_key_present"] is True
     assert os.getenv("OPENAI_API_KEY") == "sk-test"
+
+
+def test_run_endpoint_spawns_child_worker(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    calls = []
+
+    def fake_start(self, run_id, request):
+        """Purpose: prove the web endpoint delegates scrape work out of process."""
+
+        calls.append((run_id, request.date_from.isoformat(), request.date_to.isoformat()))
+        return {"run_id": run_id, "status": statuses.RUNNING, "worker_pid": 4321}
+
+    monkeypatch.setattr(PlanCommissionWorkbench, "start_madison_run_worker", fake_start)
+    client = TestClient(create_app(start_watchdog=False))
+    response = client.post("/runs/madison", json={"date_from": "2026-06-01", "date_to": "2026-06-02"})
+
+    assert response.status_code == 200
+    assert response.json()["worker_pid"] == 4321
+    assert calls == [(1, "2026-06-01", "2026-06-02")]

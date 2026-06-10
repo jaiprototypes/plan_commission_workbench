@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import subprocess
 import threading
+from typing import Any
 
 from .storage import ReviewStore
 
@@ -46,7 +49,51 @@ class RunWatchdog:
     def audit_once(self) -> list[dict]:
         """Purpose: expose one watchdog pass for tests and startup recovery."""
 
-        return self.store.mark_stale_running_runs(self.stale_after_seconds)
+        marked = self.store.mark_stale_running_runs(self.stale_after_seconds)
+        for row in marked:
+            self._stop_live_worker(row)
+        return marked
+
+    def _stop_live_worker(self, row: dict[str, Any]) -> None:
+        """Purpose: stop stale child workers after the DB is marked failed."""
+
+        pid = row.get("worker_pid")
+        if row.get("pid_alive") is not True or row.get("worker_spawned") is not True or not isinstance(pid, int):
+            return
+        detail = self._kill_process_tree(pid)
+        self.store.log_event(row["run_id"], "watchdog_worker_kill", "watchdog", None, detail)
+
+    def _kill_process_tree(self, pid: int) -> str:
+        """Purpose: terminate a stale worker and any Docling descendants."""
+
+        if os.name == "nt":
+            return self._kill_windows_process_tree(pid)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return f"sent SIGKILL to worker process group {pid}"
+        except Exception as exc:
+            return f"process-group kill failed for worker {pid}: {exc}; {self._kill_direct_process(pid)}"
+
+    def _kill_windows_process_tree(self, pid: int) -> str:
+        """Purpose: use taskkill for Windows child process trees."""
+
+        try:
+            completed = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
+        except Exception as exc:
+            return f"taskkill failed for worker process tree {pid}: {exc}; {self._kill_direct_process(pid)}"
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if completed.returncode == 0:
+            return f"terminated worker process tree {pid}"
+        return f"taskkill exited {completed.returncode} for worker process tree {pid}: {detail[-300:]}; {self._kill_direct_process(pid)}"
+
+    def _kill_direct_process(self, pid: int) -> str:
+        """Purpose: provide a last-resort direct worker kill."""
+
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            return "direct worker kill requested"
+        except Exception as exc:
+            return f"direct worker kill failed: {exc}"
 
     def _loop(self) -> None:
         """Purpose: audit immediately, then keep checking until shutdown."""

@@ -55,6 +55,7 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --collect-all "rapidocr" `
     --collect-all "openai" `
     --hidden-import "plan_commission_workbench.docling_worker" `
+    --hidden-import "plan_commission_workbench.run_worker" `
     --hidden-import "plan_commission_workbench.server" `
     --hidden-import "uvicorn.logging" `
     --hidden-import "uvicorn.loops.auto" `

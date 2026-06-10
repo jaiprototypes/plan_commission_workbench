@@ -6,6 +6,8 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 import zipfile
 
@@ -51,11 +53,12 @@ class PlanCommissionWorkbench:
         self.store.log_event(run_id, "created", "runner", None, f"Created Madison run {date_from} to {date_to}")
         return run_id
 
-    def execute_madison_run(self, run_id: int, request: RunRequest) -> dict[str, Any] | None:
+    def execute_madison_run(self, run_id: int, request: RunRequest, *, register_worker: bool = True) -> dict[str, Any] | None:
         """Purpose: execute one run and always clean temporary source files."""
 
         run_tmp = self.runtime.run_tmp_dir(run_id)
-        self.store.register_run_worker(run_id, os.getpid())
+        if register_worker:
+            self.store.register_run_worker(run_id, os.getpid())
         try:
             agenda = AgendaPipeline(self.store, self.legistar, self.docling, self.llm)
             applications = ApplicationPipeline(self.store, self.legistar, self.docling, self.llm)
@@ -115,6 +118,68 @@ class PlanCommissionWorkbench:
         run_id = self.create_madison_run(date_from, date_to, request_text)
         return self.execute_madison_run(run_id, request)
 
+    def start_madison_run_worker(self, run_id: int, request: RunRequest) -> dict[str, Any]:
+        """Purpose: keep the web server responsive while scrape work runs."""
+
+        stdout_path, stderr_path = self.runtime.run_worker_log_paths(run_id)
+        try:
+            with stdout_path.open("a", encoding="utf-8") as stdout_fh, stderr_path.open("a", encoding="utf-8") as stderr_fh:
+                process = subprocess.Popen(
+                    self._run_worker_command(run_id, request),
+                    stdout=stdout_fh,
+                    stderr=stderr_fh,
+                    env=self._run_worker_env(),
+                    text=True,
+                    **self._run_worker_process_group_kwargs(),
+                )
+        except Exception as exc:
+            self.store.fail_run_from_exception(run_id, statuses.FAILED_AGENDA_LLM, exc)
+            raise
+        self.store.register_run_worker(run_id, process.pid)
+        self.store.log_event(
+            run_id,
+            "worker_spawn",
+            "runner",
+            None,
+            f"Spawned run worker PID {process.pid}; stdout={stdout_path.name}; stderr={stderr_path.name}",
+        )
+        return {"run_id": run_id, "status": statuses.RUNNING, "worker_pid": process.pid}
+
+    def _run_worker_command(self, run_id: int, request: RunRequest) -> list[str]:
+        """Purpose: start run workers from source or frozen desktop builds."""
+
+        args = [
+            "--run-id",
+            str(run_id),
+            "--date-from",
+            request.date_from.isoformat(),
+            "--date-to",
+            request.date_to.isoformat(),
+        ]
+        if request.request_text:
+            args.extend(["--request-text", request.request_text])
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--run-worker", *args]
+        return [sys.executable, "-m", "plan_commission_workbench.run_worker", *args]
+
+    def _run_worker_env(self) -> dict[str, str]:
+        """Purpose: pass writable state and API keys into child workers."""
+
+        env = os.environ.copy()
+        env["PCW_DATA_DIR"] = str(self.runtime.data_dir)
+        return env
+
+    def _run_worker_process_group_kwargs(self) -> dict[str, Any]:
+        """Purpose: let the watchdog kill a stale worker and descendants."""
+
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if flags or no_window:
+                return {"creationflags": flags | no_window}
+            return {}
+        return {"start_new_session": True}
+
     def retry_run(self, run_id: int) -> dict[str, Any] | None:
         """Purpose: retry a prior run while skip checks reuse completed rows."""
 
@@ -152,6 +217,7 @@ class PlanCommissionWorkbench:
                 self._write_bundle_manifest(archive, stamp, backup_error)
                 self._write_bundle_log(archive, self.runtime.server_log_path, "server.log")
                 self._write_bundle_log(archive, self.runtime.server_error_log_path, "server.err.log")
+                self._write_bundle_run_logs(archive)
         finally:
             cleanup_error = self._remove_temp_bundle_file(db_backup_path)
         result = {
@@ -212,6 +278,17 @@ class PlanCommissionWorkbench:
                 archive.writestr(arcname, path.read_text(encoding="utf-8", errors="replace"))
         except OSError as exc:
             archive.writestr(f"{arcname}.error.txt", f"Could not read {path}: {exc}")
+
+    def _write_bundle_run_logs(self, archive: zipfile.ZipFile) -> None:
+        """Purpose: preserve child-worker evidence for hung scrape diagnosis."""
+
+        try:
+            paths = sorted(path for path in self.runtime.run_log_dir.glob("*") if path.is_file())
+        except OSError as exc:
+            archive.writestr("run_logs.error.txt", f"Could not list {self.runtime.run_log_dir}: {exc}")
+            return
+        for path in paths:
+            self._write_bundle_log(archive, path, f"run_logs/{path.name}")
 
     def openai_status(self) -> dict[str, Any]:
         """Purpose: expose LLM readiness without making a model call."""

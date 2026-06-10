@@ -259,7 +259,23 @@ class ReviewStore:
                     """,
                     (row["id"], status, "watchdog", row["heartbeat_source"], message, None, stamp),
                 )
-                marked.append({"run_id": row["id"], "status": status, "message": message})
+                worker_spawned = bool(
+                    conn.execute(
+                        "SELECT 1 FROM run_events WHERE run_id = ? AND stage = ? LIMIT 1",
+                        (row["id"], "worker_spawn"),
+                    ).fetchone()
+                )
+                marked.append(
+                    {
+                        "run_id": row["id"],
+                        "status": status,
+                        "message": message,
+                        "worker_pid": row["worker_pid"],
+                        "pid_alive": result["pid_alive"],
+                        "reason": result["reason"],
+                        "worker_spawned": worker_spawned,
+                    }
+                )
         return marked
 
     def _stale_result(self, row: dict[str, Any], now: dt.datetime, stale_after_seconds: int) -> dict[str, Any] | None:

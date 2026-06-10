@@ -15,6 +15,7 @@ from plan_commission_workbench.models import (
     ApplicationExtraction,
     ContactFields,
     FieldEvidence,
+    RunRequest,
 )
 from plan_commission_workbench.storage import ReviewStore
 from plan_commission_workbench.runtime import WorkbenchRuntime
@@ -245,6 +246,57 @@ def test_diagnostic_bundle_downloads_when_temp_cleanup_fails(monkeypatch, tmp_pa
         assert "workbench.db" in archive.namelist()
 
 
+def test_diagnostic_bundle_includes_run_worker_logs(tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+    stdout_path, stderr_path = runtime.run_worker_log_paths(42)
+    stdout_path.write_text("worker stdout", encoding="utf-8")
+    stderr_path.write_text("worker stderr", encoding="utf-8")
+
+    result = workbench.create_diagnostic_bundle()
+
+    with zipfile.ZipFile(result["path"]) as archive:
+        assert archive.read("run_logs/run_42.log").decode("utf-8") == "worker stdout"
+        assert archive.read("run_logs/run_42.err.log").decode("utf-8") == "worker stderr"
+
+
+def test_start_madison_run_worker_records_child_pid(monkeypatch, tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+    run_id = workbench.create_madison_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    launched = {}
+
+    class FakePopen:
+        """Purpose: capture worker launch arguments without starting a scrape."""
+
+        pid = 2468
+
+        def __init__(self, command, stdout, stderr, env, text, **kwargs) -> None:
+            launched["command"] = command
+            launched["stdout"] = Path(stdout.name).name
+            launched["stderr"] = Path(stderr.name).name
+            launched["env"] = env
+            launched["text"] = text
+            launched["process_kwargs"] = kwargs
+
+    monkeypatch.setattr("plan_commission_workbench.api.subprocess.Popen", FakePopen)
+
+    result = workbench.start_madison_run_worker(
+        run_id,
+        RunRequest(dt.date(2026, 6, 1), dt.date(2026, 6, 2)),
+    )
+
+    row = workbench.store.get_run(run_id)
+    assert result["worker_pid"] == 2468
+    assert row and row["worker_pid"] == 2468
+    assert launched["command"][1:3] == ["-m", "plan_commission_workbench.run_worker"]
+    assert launched["env"]["PCW_DATA_DIR"] == str(runtime.data_dir)
+    assert launched["stdout"] == f"run_{run_id}.log"
+    assert launched["stderr"] == f"run_{run_id}.err.log"
+    assert launched["text"] is True
+    assert "start_new_session" in launched["process_kwargs"] or "creationflags" in launched["process_kwargs"]
+
+
 def test_store_backup_closes_destination_connection(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()
@@ -325,6 +377,48 @@ def test_watchdog_marks_stale_application_docling_run_and_preserves_failure(tmp_
     assert row["status"] == statuses.FAILED_APPLICATION_DOCLING
     assert "heartbeat timed out" in row["last_error"]
     assert late_completion is False
+
+
+def test_watchdog_kills_stale_live_worker(monkeypatch, tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    store.register_run_worker(run_id, 99999)
+    store.log_event(run_id, "worker_spawn", "runner", None, "Spawned run worker PID 99999")
+    assert store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", "agenda_item:240", "Extracting stuck PDF")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET heartbeat_at = ? WHERE id = ?", ("2026-01-01T00:00:00Z", run_id))
+    killed = []
+
+    monkeypatch.setattr("plan_commission_workbench.storage._pid_alive", lambda _pid: True)
+    monkeypatch.setattr(RunWatchdog, "_kill_process_tree", lambda _self, pid: killed.append(pid) or f"killed {pid}")
+
+    marked = RunWatchdog(store, stale_after_seconds=1).audit_once()
+    events = store.list_run_events(run_id)
+
+    assert marked[0]["pid_alive"] is True
+    assert marked[0]["worker_spawned"] is True
+    assert killed == [99999]
+    assert any(event["stage"] == "watchdog_worker_kill" and "killed 99999" in event["message"] for event in events)
+
+
+def test_watchdog_does_not_kill_legacy_server_pid(monkeypatch, tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    store.register_run_worker(run_id, 88888)
+    assert store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", "agenda_item:240", "Legacy stuck PDF")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET heartbeat_at = ? WHERE id = ?", ("2026-01-01T00:00:00Z", run_id))
+    killed = []
+
+    monkeypatch.setattr("plan_commission_workbench.storage._pid_alive", lambda _pid: True)
+    monkeypatch.setattr(RunWatchdog, "_kill_process_tree", lambda _self, pid: killed.append(pid) or f"killed {pid}")
+
+    marked = RunWatchdog(store, stale_after_seconds=1).audit_once()
+
+    assert marked[0]["worker_spawned"] is False
+    assert killed == []
 
 
 def test_label_export_keeps_newest_duplicate_contact_and_older_new_contact(tmp_path) -> None:

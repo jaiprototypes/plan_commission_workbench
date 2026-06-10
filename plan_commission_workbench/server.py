@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -91,15 +91,17 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/runs/madison")
-    def run_madison(payload: MadisonRunRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    def run_madison(payload: MadisonRunRequest) -> dict[str, Any]:
         try:
             workbench.require_openai_api_key()
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         run_id = workbench.create_madison_run(payload.date_from, payload.date_to, payload.request_text)
         request = RunRequest(payload.date_from, payload.date_to, payload.request_text)
-        background_tasks.add_task(workbench.execute_madison_run, run_id, request)
-        return {"run_id": run_id, "status": statuses.RUNNING}
+        try:
+            return workbench.start_madison_run_worker(run_id, request)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not start run worker: {exc}") from exc
 
     @app.get("/runs")
     def runs() -> list[dict[str, Any]]:
@@ -117,7 +119,7 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
         return workbench.store.list_run_events(run_id)
 
     @app.post("/runs/{run_id}/retry")
-    def retry_run(run_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    def retry_run(run_id: int) -> dict[str, Any]:
         try:
             workbench.require_openai_api_key()
         except RuntimeError as exc:
@@ -128,8 +130,11 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
         date_from = dt.date.fromisoformat(prior["date_from"])
         date_to = dt.date.fromisoformat(prior["date_to"])
         new_run_id = workbench.create_madison_run(date_from, date_to, prior.get("run_request_text"))
-        background_tasks.add_task(workbench.execute_madison_run, new_run_id, RunRequest(date_from, date_to, prior.get("run_request_text")))
-        return {"run_id": new_run_id, "retry_of": run_id, "status": statuses.RUNNING}
+        try:
+            response = workbench.start_madison_run_worker(new_run_id, RunRequest(date_from, date_to, prior.get("run_request_text")))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not start retry worker: {exc}") from exc
+        return {**response, "retry_of": run_id}
 
     @app.get("/agenda-items")
     def agenda_items(status: str | None = Query(default=None)) -> list[dict[str, Any]]:
