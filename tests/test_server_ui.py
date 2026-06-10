@@ -55,6 +55,36 @@ def test_agenda_js_exposes_review_actions() -> None:
     assert "reviewAgendaItem" in script
     assert "/agenda-items/${id}/review" in script
     assert "data-agenda-review" in script
+    assert '"not_target_project"].includes(status)' in script
+
+
+def test_review_js_links_items_to_agenda_rows() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "agendaItemLink" in script
+    assert "/agenda?item=${encodeURIComponent(row.agenda_item_id)}" in script
+    assert "data-agenda-id" in script
+    assert "scrollToFocusedAgendaRow" in script
+
+
+def test_agenda_table_uses_compact_description_cells() -> None:
+    template = (PACKAGE_ROOT / "templates" / "agenda.html").read_text(encoding="utf-8")
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    styles = (PACKAGE_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "agenda-table" in template
+    assert "agenda-description" in script
+    assert "agenda-text-box" in script
+    assert ".agenda-table" in styles
+    assert "table-layout: fixed" in styles
+
+
+def test_review_js_downloads_workbook_exports() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "downloadExport(result.id)" in script
+    assert "/exports/${exportId}/download" in script
+    assert "Your browser will download the workbook" in script
 
 
 def test_state_bundle_endpoint_returns_zip(monkeypatch, tmp_path) -> None:

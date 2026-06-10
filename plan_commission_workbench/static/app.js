@@ -36,7 +36,7 @@ function qualityIssues(row) {
 function statusClass(status, row = null) {
   if (status === "application_extracted" && qualityIssues(row).length) return "warn";
   if (["completed", "accepted", "application_extracted", "agenda_hit"].includes(status)) return "ok";
-  if (String(status || "").startsWith("failed") || status === "rejected") return "fail";
+  if (String(status || "").startsWith("failed") || ["rejected", "not_target_project"].includes(status)) return "fail";
   return "warn";
 }
 
@@ -165,22 +165,31 @@ async function loadAgenda() {
   const body = $("#agenda-body");
   if (!body) return;
   const status = $("#agenda-status")?.value || "";
+  const focusedAgendaId = new URLSearchParams(window.location.search).get("item");
   const rows = await getJson(`/agenda-items${status ? `?status=${encodeURIComponent(status)}` : ""}`);
   body.innerHTML = rows.map((row) => `
-    <tr>
+    <tr class="${String(row.id) === focusedAgendaId ? "selected-row agenda-focus-row" : ""}" data-agenda-id="${row.id}">
       <td>${escapeHtml(row.meeting_date)}</td>
       <td>${escapeHtml(row.event_id)}</td>
       <td>${escapeHtml(row.city_item_id)}</td>
       <td class="${statusClass(row.classification)}">${escapeHtml(row.classification)}</td>
       <td>${Number(row.confidence || 0).toFixed(2)}</td>
-      <td>${escapeHtml(row.description)}</td>
-      <td>${escapeHtml(row.reason)}</td>
+      <td class="agenda-description"><div class="agenda-text-box" title="${escapeHtml(row.description)}">${escapeHtml(row.description)}</div></td>
+      <td class="agenda-reason"><div class="agenda-text-box" title="${escapeHtml(row.reason)}">${escapeHtml(row.reason)}</div></td>
       <td>${agendaActions(row)}</td>
     </tr>
   `).join("");
   body.querySelectorAll("[data-agenda-review]").forEach((button) => {
     button.addEventListener("click", () => reviewAgendaItem(button.dataset.agendaReview, button.dataset.classification).catch(alert));
   });
+  scrollToFocusedAgendaRow(body, focusedAgendaId);
+}
+
+function scrollToFocusedAgendaRow(body, focusedAgendaId) {
+  if (!focusedAgendaId) return;
+  const row = Array.from(body.querySelectorAll("[data-agenda-id]"))
+    .find((item) => item.dataset.agendaId === focusedAgendaId);
+  if (row) row.scrollIntoView({block: "center"});
 }
 
 function agendaActions(row) {
@@ -284,6 +293,7 @@ function applicationCard(row, review = false) {
   const rawAttributes = sourceAttributes(row.evidence || []);
   const warnings = qualityNotice(row);
   const duplicates = duplicateNotice(row);
+  const agendaItem = review ? agendaItemLink(row) : `Item ${escapeHtml(row.city_item_id)}`;
   const actions = review ? `
     <div class="review-actions">
       <textarea data-corrections="${row.id}" placeholder='{"applicant_name":"Corrected value"}'></textarea>
@@ -295,7 +305,7 @@ function applicationCard(row, review = false) {
   return `
     <article class="card ${qualityIssues(row).length ? "card-warning" : ""}">
       <div class="card-head">
-        <strong>${escapeHtml(row.meeting_date)} | Item ${escapeHtml(row.city_item_id)}</strong>
+        <strong>${escapeHtml(row.meeting_date)} | ${agendaItem}</strong>
         <span class="${statusClass(row.status, row)}">${escapeHtml(row.status)}</span>
       </div>
       ${warnings}
@@ -314,6 +324,12 @@ function applicationCard(row, review = false) {
       ${actions}
     </article>
   `;
+}
+
+function agendaItemLink(row) {
+  if (!row.agenda_item_id) return `Item ${escapeHtml(row.city_item_id)}`;
+  const href = `/agenda?item=${encodeURIComponent(row.agenda_item_id)}`;
+  return `<a class="agenda-shortcut" href="${href}">Item ${escapeHtml(row.city_item_id)}</a>`;
 }
 
 function rejectedApplicationsDropdown(rows) {
@@ -377,7 +393,8 @@ function setupExport() {
     try {
       const form = new FormData(event.currentTarget);
       const result = await postExport(form.get("output"));
-      alert(`Exported ${result.row_count} row(s)`);
+      alert(`Prepared ${result.row_count} accepted row(s). Your browser will download the workbook.`);
+      downloadExport(result.id);
     } catch (error) {
       alert(error.message);
     }
@@ -389,11 +406,15 @@ function setupExport() {
       const result = await postExport(form.get("output"));
       const skipped = result.qc_skipped_count || 0;
       alert(`Prepared ${result.row_count} label(s). QC skipped ${skipped} contact(s).`);
-      window.location.href = `/exports/${result.id}/download`;
+      downloadExport(result.id);
     } catch (error) {
       alert(error.message);
     }
   });
+}
+
+function downloadExport(exportId) {
+  window.location.href = `/exports/${exportId}/download`;
 }
 
 async function postExport(output) {
