@@ -17,7 +17,7 @@ from plan_commission_workbench.models import (
     FieldEvidence,
     RunRequest,
 )
-from plan_commission_workbench.storage import ReviewStore
+from plan_commission_workbench.storage import ReviewStore, _pid_alive
 from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench.watchdog import RunWatchdog
 
@@ -418,6 +418,17 @@ def test_watchdog_does_not_kill_legacy_server_pid(monkeypatch, tmp_path) -> None
     marked = RunWatchdog(store, stale_after_seconds=1).audit_once()
 
     assert marked[0]["worker_spawned"] is False
+    assert killed == []
+
+
+def test_pid_alive_uses_windows_query_without_os_kill(monkeypatch) -> None:
+    killed = []
+
+    monkeypatch.setattr("plan_commission_workbench.storage.os.name", "nt")
+    monkeypatch.setattr("plan_commission_workbench.storage._windows_pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr("plan_commission_workbench.storage.os.kill", lambda pid, signal: killed.append((pid, signal)))
+
+    assert _pid_alive(12345) is True
     assert killed == []
 
 
