@@ -250,12 +250,13 @@ class ApplicationPipeline:
         """Purpose: run one Docling mode with heartbeat and granular logs."""
 
         mode = "VLM" if use_vlm else "full-page OCR" if force_full_page_ocr else "default"
+        timeout_seconds = self._docling_timeout_seconds(force_full_page_ocr, use_vlm)
         if not self.store.heartbeat_run(
             run_id,
             statuses.APPLICATION_DOCLING,
             "docling",
             identity,
-            f"Extracting {pdf_path.name} with Docling {mode}; {self.docling.mode_timeout_summary(force_full_page_ocr, use_vlm)}",
+            f"Extracting {pdf_path.name} with Docling {mode}; {self.docling.mode_timeout_summary(force_full_page_ocr, use_vlm, timeout_seconds)}",
         ):
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOCLING, "Run stopped before Docling extraction")
         result = self.docling.extract_pdf_text_result(
@@ -263,6 +264,7 @@ class ApplicationPipeline:
             docling_dir / result_dir_name(force_full_page_ocr, use_vlm),
             force_full_page_ocr=force_full_page_ocr,
             use_vlm=use_vlm,
+            timeout_seconds=timeout_seconds,
             progress_callback=lambda message: self.store.heartbeat_run(
                 run_id,
                 statuses.APPLICATION_DOCLING,
@@ -293,6 +295,17 @@ class ApplicationPipeline:
             f"Sections 3/5 {status} from Docling {result.mode}; clipped_chars={len(clipped)}, source_chars={len(result.text)}",
         )
         return clipped
+
+    def _docling_timeout_seconds(self, force_full_page_ocr: bool, use_vlm: bool) -> float | None:
+        """Purpose: move bad applications past default Docling without slowing agendas."""
+
+        if force_full_page_ocr or use_vlm:
+            return None
+        try:
+            value = float(os.getenv("PCW_DOCLING_APPLICATION_TIMEOUT_SECONDS", "45"))
+        except ValueError:
+            return 45.0
+        return max(10.0, value)
 
     def _full_page_retry_enabled(self) -> bool:
         """Purpose: allow operators to disable slower OCR retry if needed."""

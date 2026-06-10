@@ -76,12 +76,14 @@ ends. Durable state is the SQLite data plus reviewed exports.
 
 ## Runtime Safeguards
 
-Long Docling conversions run in child worker processes with hard timeouts and
-visible run-log heartbeats. Useful controls:
+Long Docling conversions run in isolated child worker process groups with hard
+timeouts, process-tree cleanup, and visible run-log heartbeats. Useful controls:
 
 - `PCW_DOCLING_WORKER_PROGRESS_SECONDS`: worker progress ping interval, default
   `30`.
 - `PCW_DOCLING_TIMEOUT_SECONDS`: default Docling timeout, default `120`.
+- `PCW_DOCLING_APPLICATION_TIMEOUT_SECONDS`: application default-Docling
+  timeout before moving to OCR/VLM fallback, default `45`.
 - `PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS`: full-page OCR retry timeout, default
   `600`.
 - `PCW_DOCLING_VLM_TIMEOUT_SECONDS`: VLM fallback timeout, default `900`.

@@ -119,6 +119,7 @@ class FakeDocling(DoclingTextExtractor):
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
         progress_callback=None,
+        timeout_seconds=None,
     ) -> DoclingTextResult:
         text = self.extract_pdf_text(pdf_path, output_dir)
         mode = "vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default"
@@ -137,6 +138,7 @@ class RetryApplicationDocling(DoclingTextExtractor):
     def __init__(self) -> None:
         super().__init__()
         self.modes: list[str] = []
+        self.timeouts: list[float | None] = []
 
     def extract_pdf_text_result(
         self,
@@ -146,8 +148,10 @@ class RetryApplicationDocling(DoclingTextExtractor):
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
         progress_callback=None,
+        timeout_seconds=None,
     ) -> DoclingTextResult:
         self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
+        self.timeouts.append(timeout_seconds)
         output_dir.mkdir(parents=True, exist_ok=True)
         if pdf_path.name.startswith("agenda"):
             text = """
@@ -179,8 +183,10 @@ class VlmApplicationDocling(RetryApplicationDocling):
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
         progress_callback=None,
+        timeout_seconds=None,
     ) -> DoclingTextResult:
         self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
+        self.timeouts.append(timeout_seconds)
         output_dir.mkdir(parents=True, exist_ok=True)
         if pdf_path.name.startswith("agenda"):
             return DoclingTextResult(
@@ -341,6 +347,7 @@ def test_application_docling_retries_full_page_ocr_when_sections_are_missing(tmp
 
     assert result["status"] == statuses.COMPLETED
     assert docling.modes == ["default", "default", "full_page_ocr"]
+    assert docling.timeouts == [None, 45.0, None]
     assert "application_docling_retry" in stages
     assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1
 
@@ -354,5 +361,6 @@ def test_application_docling_uses_vlm_after_default_and_ocr_miss_sections(tmp_pa
 
     assert result["status"] == statuses.COMPLETED
     assert docling.modes == ["default", "default", "full_page_ocr", "vlm"]
+    assert docling.timeouts == [None, 45.0, None, None]
     assert "application_docling_vlm_retry" in stages
     assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1

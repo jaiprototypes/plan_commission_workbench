@@ -211,11 +211,14 @@ def test_docling_subprocess_timeout_is_reported(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setenv("PCW_DOCLING_TIMEOUT_SECONDS", "10")
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", lambda *_args, **_kwargs: HangingProcess())
+    monkeypatch.setattr("plan_commission_workbench.docling_adapter.os.killpg", lambda *_args: (_ for _ in ()).throw(OSError("missing group")))
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.time.sleep", lambda _seconds: None)
 
-    with pytest.raises(DoclingExtractionError, match="timed out after 10 seconds"):
+    with pytest.raises(DoclingExtractionError, match="timed out after 10 seconds") as excinfo:
         DoclingTextExtractor().extract_pdf_text_result(pdf_path, tmp_path / "docling")
+
+    assert "direct worker kill requested" in str(excinfo.value)
 
 
 def test_docling_subprocess_reports_progress_while_worker_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

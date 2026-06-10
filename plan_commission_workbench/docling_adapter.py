@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ class DoclingTextExtractor:
         force_full_page_ocr: bool = False,
         use_vlm: bool = False,
         progress_callback: ProgressCallback | None = None,
+        timeout_seconds: float | None = None,
     ) -> DoclingTextResult:
         """Purpose: extract text and report whether default or OCR mode was used."""
 
@@ -59,6 +61,7 @@ class DoclingTextExtractor:
                 force_full_page_ocr=force_full_page_ocr,
                 use_vlm=use_vlm,
                 progress_callback=progress_callback,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             raise DoclingExtractionError(f"Docling {mode} failed for {pdf_path.name}: {exc}; {self._file_context(pdf_path)}") from exc
@@ -76,6 +79,7 @@ class DoclingTextExtractor:
         force_full_page_ocr: bool,
         use_vlm: bool,
         progress_callback: ProgressCallback | None,
+        timeout_seconds: float | None,
     ) -> str:
         """Purpose: run Docling in-process for tests or subprocess for hard timeouts."""
 
@@ -87,6 +91,7 @@ class DoclingTextExtractor:
             force_full_page_ocr=force_full_page_ocr,
             use_vlm=use_vlm,
             progress_callback=progress_callback,
+            timeout_seconds=timeout_seconds,
         )
 
     def _extract_text_inline(self, pdf_path: Path, output_dir: Path, *, force_full_page_ocr: bool, use_vlm: bool) -> str:
@@ -105,6 +110,7 @@ class DoclingTextExtractor:
         force_full_page_ocr: bool,
         use_vlm: bool,
         progress_callback: ProgressCallback | None,
+        timeout_seconds: float | None,
     ) -> str:
         """Purpose: isolate Docling so a hung converter can be timed out and observed."""
 
@@ -112,7 +118,7 @@ class DoclingTextExtractor:
         output_json = output_dir / f"{pdf_path.name}.{mode}.worker.json"
         stdout_log = output_dir / f"{pdf_path.name}.{mode}.worker.stdout.log"
         stderr_log = output_dir / f"{pdf_path.name}.{mode}.worker.stderr.log"
-        timeout_seconds = self._timeout_seconds(force_full_page_ocr, use_vlm)
+        timeout_seconds = self._timeout_seconds(force_full_page_ocr, use_vlm, timeout_seconds)
         command = self._worker_command(pdf_path, output_json, force_full_page_ocr, use_vlm)
         env = os.environ.copy()
         env["DOCLING_CACHE_DIR"] = str(output_dir / "cache")
@@ -124,8 +130,8 @@ class DoclingTextExtractor:
             progress_callback,
             f"Docling {mode} worker PID {process.pid} started; timeout_seconds={timeout_seconds:g}",
         ):
-            self._kill_worker(process)
-            raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active")
+            kill_detail = self._kill_worker(process)
+            raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active; {kill_detail}")
         start = time.monotonic()
         deadline = start + timeout_seconds
         progress_interval = self._worker_progress_interval()
@@ -136,9 +142,9 @@ class DoclingTextExtractor:
                 break
             now = time.monotonic()
             if now >= deadline:
-                self._kill_worker(process)
+                kill_detail = self._kill_worker(process)
                 detail = self._worker_log_detail(stderr_log, stdout_log)
-                suffix = f": {detail}" if detail else ""
+                suffix = f"; {kill_detail}: {detail}" if detail else f"; {kill_detail}"
                 raise DoclingExtractionError(f"Docling {mode} timed out after {timeout_seconds:g} seconds{suffix}")
             if now >= next_progress:
                 elapsed = int(now - start)
@@ -146,8 +152,8 @@ class DoclingTextExtractor:
                     progress_callback,
                     f"Docling {mode} worker PID {process.pid} still running after {elapsed}s; timeout_seconds={timeout_seconds:g}",
                 ):
-                    self._kill_worker(process)
-                    raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active")
+                    kill_detail = self._kill_worker(process)
+                    raise DoclingExtractionError(f"Docling {mode} worker stopped because the run is no longer active; {kill_detail}")
                 next_progress = now + progress_interval
             time.sleep(0.5)
         if return_code != 0:
@@ -174,21 +180,74 @@ class DoclingTextExtractor:
         stdout_fh = stdout_log.open("w", encoding="utf-8")
         stderr_fh = stderr_log.open("w", encoding="utf-8")
         try:
-            return subprocess.Popen(command, stdout=stdout_fh, stderr=stderr_fh, env=env, text=True)
+            return subprocess.Popen(
+                command,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                env=env,
+                text=True,
+                **self._worker_process_group_kwargs(),
+            )
         finally:
             stdout_fh.close()
             stderr_fh.close()
 
-    def _kill_worker(self, process: subprocess.Popen) -> None:
+    def _kill_worker(self, process: subprocess.Popen) -> str:
         """Purpose: stop a stuck Docling child before moving to the next fallback."""
 
         if process.poll() is not None:
-            return
-        process.kill()
+            return "worker already exited"
+        detail = self._kill_process_tree(process)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            return
+            return f"{detail}; worker still present after kill wait"
+        return detail
+
+    def _worker_process_group_kwargs(self) -> dict[str, Any]:
+        """Purpose: isolate Docling so timeout cleanup can kill descendants."""
+
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if flags or no_window:
+                return {"creationflags": flags | no_window}
+            return {}
+        return {"start_new_session": True}
+
+    def _kill_process_tree(self, process: subprocess.Popen) -> str:
+        """Purpose: terminate child processes that Docling may spawn internally."""
+
+        if os.name == "nt":
+            return self._kill_windows_process_tree(process)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return f"sent SIGKILL to worker process group {process.pid}"
+        except Exception as exc:
+            return f"process-group kill failed: {exc}; {self._kill_direct_process(process)}"
+
+    def _kill_windows_process_tree(self, process: subprocess.Popen) -> str:
+        """Purpose: use Windows taskkill to stop the worker and its children."""
+
+        pid = process.pid
+        command = ["taskkill", "/PID", str(pid), "/T", "/F"]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        except Exception as exc:
+            return f"taskkill failed for worker process tree {pid}: {exc}; {self._kill_direct_process(process)}"
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if completed.returncode == 0:
+            return f"terminated worker process tree {pid}"
+        return f"taskkill exited {completed.returncode} for worker process tree {pid}: {detail[-300:]}; {self._kill_direct_process(process)}"
+
+    def _kill_direct_process(self, process: subprocess.Popen) -> str:
+        """Purpose: provide a last-resort kill for the direct worker process."""
+
+        try:
+            process.kill()
+            return "direct worker kill requested"
+        except Exception as exc:
+            return f"direct worker kill failed: {exc}"
 
     def _report_progress(self, progress_callback: ProgressCallback | None, message: str) -> bool:
         """Purpose: let callers keep DB heartbeats alive during long Docling work."""
@@ -234,9 +293,16 @@ class DoclingTextExtractor:
             return [sys.executable, *args]
         return [sys.executable, "-m", "plan_commission_workbench.docling_worker", *args[1:]]
 
-    def _timeout_seconds(self, force_full_page_ocr: bool, use_vlm: bool = False) -> float:
+    def _timeout_seconds(
+        self,
+        force_full_page_ocr: bool,
+        use_vlm: bool = False,
+        override_seconds: float | None = None,
+    ) -> float:
         """Purpose: bound Docling work so retry logic can proceed."""
 
+        if override_seconds is not None:
+            return max(10.0, override_seconds)
         if use_vlm:
             name = "PCW_DOCLING_VLM_TIMEOUT_SECONDS"
             default = 900.0
@@ -366,11 +432,16 @@ class DoclingTextExtractor:
 
         return f"preset={self._vlm_preset()}, images_scale={self._images_scale():g}, timeout_seconds={self._timeout_seconds(False, use_vlm=True):g}"
 
-    def mode_timeout_summary(self, force_full_page_ocr: bool, use_vlm: bool = False) -> str:
+    def mode_timeout_summary(
+        self,
+        force_full_page_ocr: bool,
+        use_vlm: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> str:
         """Purpose: describe Docling timeout settings in run logs."""
 
         mode = self._mode_name(force_full_page_ocr, use_vlm)
-        return f"mode={mode}, timeout_seconds={self._timeout_seconds(force_full_page_ocr, use_vlm):g}"
+        return f"mode={mode}, timeout_seconds={self._timeout_seconds(force_full_page_ocr, use_vlm, timeout_seconds):g}"
 
     def _mode_name(self, force_full_page_ocr: bool, use_vlm: bool = False) -> str:
         """Purpose: normalize Docling mode names across parent and worker."""
