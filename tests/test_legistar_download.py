@@ -44,6 +44,37 @@ class FakeSession:
         return self.response
 
 
+class FakeJsonResponse:
+    """Purpose: mimic a JSON Legistar API response."""
+
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class SequenceSession:
+    """Purpose: return or raise queued values for retry tests."""
+
+    def __init__(self, outcomes) -> None:
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def mount(self, *_args) -> None:
+        return None
+
+    def get(self, *_args, **_kwargs):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
 def _client_for(payload: bytes, headers: dict[str, str] | None = None) -> LegistarClient:
     """Purpose: construct a Legistar client backed by fake response bytes."""
 
@@ -78,6 +109,43 @@ def test_download_file_rejects_truncated_response(tmp_path: Path) -> None:
 
     with pytest.raises(DownloadError, match="truncated"):
         client.download_file("https://example.test/agenda.pdf", tmp_path / "agenda.pdf")
+
+
+def test_fetch_event_items_reports_visible_retry_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = SequenceSession(
+        [
+            TimeoutError("connection timed out"),
+            FakeJsonResponse({"EventItems": [{"EventItemMatterId": "100"}]}),
+        ]
+    )
+    messages: list[str] = []
+    client = LegistarClient("madison", session=session)
+
+    monkeypatch.setenv("PCW_LEGISTAR_JSON_ATTEMPTS", "2")
+    monkeypatch.setattr("plan_commission_workbench.legistar.time.sleep", lambda _seconds: None)
+
+    rows = client.fetch_event_items("27908", progress_callback=lambda message: messages.append(message))
+
+    assert rows == [{"EventItemMatterId": "100"}]
+    assert session.calls == 2
+    assert any("request attempt 1/2" in message for message in messages)
+    assert any("failed: connection timed out; retrying" in message for message in messages)
+    assert any("request attempt 2/2 succeeded" in message for message in messages)
+
+
+def test_fetch_event_items_fails_after_configured_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = SequenceSession([TimeoutError("first"), TimeoutError("second")])
+    messages: list[str] = []
+    client = LegistarClient("madison", session=session)
+
+    monkeypatch.setenv("PCW_LEGISTAR_JSON_ATTEMPTS", "2")
+    monkeypatch.setattr("plan_commission_workbench.legistar.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(DownloadError, match="failed after 2 attempt"):
+        client.fetch_event_items("27908", progress_callback=lambda message: messages.append(message))
+
+    assert session.calls == 2
+    assert any("failed after 2 attempt" in message for message in messages)
 
 
 def test_docling_failure_includes_file_context(tmp_path: Path) -> None:

@@ -85,6 +85,9 @@ visible run-log heartbeats. Useful controls:
 - `PCW_DOCLING_FULL_PAGE_TIMEOUT_SECONDS`: full-page OCR retry timeout, default
   `600`.
 - `PCW_DOCLING_VLM_TIMEOUT_SECONDS`: VLM fallback timeout, default `900`.
+- `PCW_LEGISTAR_TIMEOUT_SECONDS`: per-attempt Legistar HTTP timeout, default
+  `30`.
+- `PCW_LEGISTAR_JSON_ATTEMPTS`: visible JSON metadata attempts, default `4`.
 - `PCW_RUN_STALE_SECONDS`: watchdog stale-run threshold, default `900`.
 
 ## Windows Desktop Build

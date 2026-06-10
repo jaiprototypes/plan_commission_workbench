@@ -31,7 +31,9 @@ class FakeLegistar:
             progress_callback(f"Fake Legistar event lookup from {date_from} to {date_to}")
         return [event for event in self.events if date_from <= event.meeting_date <= date_to]
 
-    def fetch_event_items(self, event_id):
+    def fetch_event_items(self, event_id, progress_callback=None):
+        if progress_callback:
+            progress_callback(f"Fake Legistar item lookup for event {event_id}")
         if str(event_id) == "28000":
             return [
                 {

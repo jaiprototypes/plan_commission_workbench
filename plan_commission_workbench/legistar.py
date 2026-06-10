@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urljoin
@@ -55,9 +57,9 @@ class LegistarClient:
         self.base_url = BASE_URL.format(tenant=tenant)
         self.session = session or requests.Session()
         retry = Retry(
-            total=3,
-            connect=3,
-            read=3,
+            total=0,
+            connect=0,
+            read=0,
             backoff_factor=1.5,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=("GET",),
@@ -81,7 +83,12 @@ class LegistarClient:
             "$orderby": "EventDate asc",
         }
         self._report_progress(progress_callback, f"Fetching Madison Plan Commission events from {date_from} to {date_to}")
-        payload = self._get_json(f"{self.base_url}/events", params=params)
+        payload = self._get_json(
+            f"{self.base_url}/events",
+            params=params,
+            progress_callback=progress_callback,
+            context="Legistar Plan Commission events",
+        )
         raw_events = payload if isinstance(payload, list) else []
         self._report_progress(progress_callback, f"Legistar returned {len(raw_events)} raw Plan Commission event(s)")
         events: list[EventRecord] = []
@@ -94,11 +101,20 @@ class LegistarClient:
                 events.append(event)
         return events
 
-    def fetch_event_items(self, event_id: str | int) -> list[dict[str, Any]]:
+    def fetch_event_items(
+        self,
+        event_id: str | int,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[dict[str, Any]]:
         """Purpose: fetch agenda items with attachment metadata."""
 
         url = f"{self.base_url}/Events/{event_id}"
-        payload = self._get_json(url, params={"EventItems": "1", "EventItemAttachments": "1"})
+        payload = self._get_json(
+            url,
+            params={"EventItems": "1", "EventItemAttachments": "1"},
+            progress_callback=progress_callback,
+            context=f"Legistar event {event_id} item metadata",
+        )
         return list(payload.get("EventItems") or []) if isinstance(payload, dict) else []
 
     def find_application_attachment(self, agenda_item: dict[str, Any], event_items: list[dict[str, Any]]) -> AttachmentRecord | None:
@@ -132,7 +148,7 @@ class LegistarClient:
         content_type: str | None = None
         content_length: int | None = None
         try:
-            with self.session.get(url, stream=True, timeout=TIMEOUT_SECONDS) as response:
+            with self.session.get(url, stream=True, timeout=self._timeout_seconds()) as response:
                 response.raise_for_status()
                 content_type = response.headers.get("Content-Type")
                 content_length = self._content_length(response.headers.get("Content-Length"))
@@ -189,7 +205,7 @@ class LegistarClient:
         if not detail_url:
             return None
         try:
-            response = self.session.get(detail_url, timeout=TIMEOUT_SECONDS)
+            response = self.session.get(detail_url, timeout=self._timeout_seconds())
             response.raise_for_status()
         except Exception:
             return None
@@ -199,12 +215,42 @@ class LegistarClient:
                 return urljoin(detail_url, href)
         return None
 
-    def _get_json(self, url: str, params: dict[str, str] | None = None) -> Any:
-        """Purpose: GET JSON with a consistent timeout."""
+    def _get_json(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        context: str = "Legistar JSON request",
+    ) -> Any:
+        """Purpose: GET JSON with explicit, visible attempts."""
 
-        response = self.session.get(url, params=params, timeout=TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json()
+        attempts = self._json_attempts()
+        timeout_seconds = self._timeout_seconds()
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self._report_progress(
+                progress_callback,
+                f"{context}: request attempt {attempt}/{attempts}; timeout_seconds={timeout_seconds:g}",
+            )
+            try:
+                response = self.session.get(url, params=params, timeout=timeout_seconds)
+                response.raise_for_status()
+                payload = response.json()
+                self._report_progress(progress_callback, f"{context}: request attempt {attempt}/{attempts} succeeded")
+                return payload
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    break
+                self._report_progress(
+                    progress_callback,
+                    f"{context}: request attempt {attempt}/{attempts} failed: {exc}; retrying",
+                )
+                time.sleep(self._retry_delay_seconds(attempt))
+        message = f"{context} failed after {attempts} attempt(s): {last_error}"
+        self._report_progress(progress_callback, message)
+        raise DownloadError(message) from last_error
 
     def _report_progress(self, progress_callback: ProgressCallback | None, message: str) -> bool:
         """Purpose: let callers write visible progress around slow Legistar calls."""
@@ -212,6 +258,29 @@ class LegistarClient:
         if not progress_callback:
             return True
         return progress_callback(message) is not False
+
+    def _timeout_seconds(self) -> float:
+        """Purpose: bound every Legistar HTTP request on vanilla machines."""
+
+        try:
+            value = float(os.getenv("PCW_LEGISTAR_TIMEOUT_SECONDS", str(TIMEOUT_SECONDS)))
+        except ValueError:
+            return float(TIMEOUT_SECONDS)
+        return max(5.0, value)
+
+    def _json_attempts(self) -> int:
+        """Purpose: make Legistar reconnection attempts visible and finite."""
+
+        try:
+            value = int(os.getenv("PCW_LEGISTAR_JSON_ATTEMPTS", "4"))
+        except ValueError:
+            return 4
+        return max(1, min(value, 8))
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        """Purpose: back off briefly between explicit JSON retries."""
+
+        return min(8.0, 1.5 * attempt)
 
     def _validate_download(
         self,

@@ -60,7 +60,11 @@ class ApplicationPipeline:
             f"Fetching Legistar item metadata for event {agenda_item['event_id']}",
         ):
             return
-        event_items = self._event_items(str(agenda_item["event_id"]))
+        try:
+            event_items = self._event_items(run_id, identity, str(agenda_item["event_id"]))
+        except DownloadError as exc:
+            self.store.log_event(run_id, statuses.FAILED_APPLICATION_DOWNLOAD, "legistar", identity, str(exc))
+            raise WorkbenchStop(statuses.FAILED_APPLICATION_DOWNLOAD, str(exc)) from exc
         attachment = self.legistar.find_application_attachment(agenda_item, event_items)
         if not attachment:
             self.store.log_event(run_id, "application_missing", "application", identity, "No standardized Land Use Application attachment found")
@@ -322,11 +326,20 @@ class ApplicationPipeline:
                 pass
         return "preset=unknown, images_scale=unknown, timeout_seconds=unknown"
 
-    def _event_items(self, event_id: str) -> list[dict]:
+    def _event_items(self, run_id: int, identity: str, event_id: str) -> list[dict]:
         """Purpose: fetch Legistar event items once per run event."""
 
         if event_id not in self._event_items_cache:
-            self._event_items_cache[event_id] = self.legistar.fetch_event_items(event_id)
+            self._event_items_cache[event_id] = self.legistar.fetch_event_items(
+                event_id,
+                progress_callback=lambda message: self.store.heartbeat_run(
+                    run_id,
+                    statuses.APPLICATION_QUEUED,
+                    "legistar",
+                    identity,
+                    message,
+                ),
+            )
         return self._event_items_cache[event_id]
 
 
