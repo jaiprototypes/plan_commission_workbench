@@ -180,7 +180,10 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
 
     @app.post("/diagnostics/state-bundle")
     def create_state_bundle() -> dict[str, Any]:
-        return workbench.create_diagnostic_bundle()
+        try:
+            return workbench.create_diagnostic_bundle()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not create diagnostics bundle: {exc}") from exc
 
     @app.get("/diagnostics/state-bundles/{filename}")
     def download_state_bundle(filename: str) -> FileResponse:

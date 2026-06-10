@@ -189,6 +189,45 @@ def test_diagnostic_bundle_contains_restorable_db_and_logs(tmp_path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 
+def test_diagnostic_bundle_survives_locked_log_file(monkeypatch, tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+    runtime.server_log_path.write_text("server log", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == runtime.server_log_path:
+            raise OSError("file is locked")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    result = workbench.create_diagnostic_bundle()
+
+    with zipfile.ZipFile(result["path"]) as archive:
+        assert "server.log.error.txt" in archive.namelist()
+        assert "file is locked" in archive.read("server.log.error.txt").decode("utf-8")
+
+
+def test_diagnostic_bundle_downloads_with_backup_warning(monkeypatch, tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+
+    def fail_backup(_destination: Path) -> Path:
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(workbench.store, "backup_to", fail_backup)
+
+    result = workbench.create_diagnostic_bundle()
+
+    assert "database is locked" in result["warning"]
+    with zipfile.ZipFile(result["path"]) as archive:
+        assert "workbench.db" not in archive.namelist()
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["db_included"] is False
+        assert "database is locked" in manifest["backup_error"]
+
+
 def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()
