@@ -69,10 +69,15 @@ class ReviewStore:
         """Purpose: create a consistent DB copy while the server may be running."""
 
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path, timeout=30) as source, sqlite3.connect(destination, timeout=30) as target:
+        source = sqlite3.connect(self.db_path, timeout=30)
+        target = sqlite3.connect(destination, timeout=30)
+        try:
             source.execute("PRAGMA busy_timeout = 30000")
             target.execute("PRAGMA busy_timeout = 30000")
             source.backup(target)
+        finally:
+            target.close()
+            source.close()
         return destination
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:

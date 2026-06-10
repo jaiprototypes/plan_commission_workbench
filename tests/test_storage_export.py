@@ -228,6 +228,34 @@ def test_diagnostic_bundle_downloads_with_backup_warning(monkeypatch, tmp_path) 
         assert "database is locked" in manifest["backup_error"]
 
 
+def test_diagnostic_bundle_downloads_when_temp_cleanup_fails(monkeypatch, tmp_path) -> None:
+    runtime = WorkbenchRuntime(project_root=tmp_path / "bundle", data_dir=tmp_path / "user-data")
+    workbench = PlanCommissionWorkbench(runtime=runtime)
+
+    monkeypatch.setattr(
+        workbench,
+        "_remove_temp_bundle_file",
+        lambda path: f"Temporary backup cleanup failed for {path.name}: locked",
+    )
+
+    result = workbench.create_diagnostic_bundle()
+
+    assert "Temporary backup cleanup failed" in result["warning"]
+    with zipfile.ZipFile(result["path"]) as archive:
+        assert "workbench.db" in archive.namelist()
+
+
+def test_store_backup_closes_destination_connection(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    backup_path = tmp_path / "backup.db"
+
+    store.backup_to(backup_path)
+    backup_path.unlink()
+
+    assert not backup_path.exists()
+
+
 def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()

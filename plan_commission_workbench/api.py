@@ -140,6 +140,7 @@ class PlanCommissionWorkbench:
         bundle_path = self.runtime.diagnostics_dir / f"pcw_state_bundle_{stamp}.zip"
         db_backup_path = self.runtime.tmp_dir / f"workbench_backup_{stamp}.db"
         backup_error: str | None = None
+        cleanup_error: str | None = None
         try:
             self.store.backup_to(db_backup_path)
         except Exception as exc:
@@ -152,21 +153,17 @@ class PlanCommissionWorkbench:
                 self._write_bundle_log(archive, self.runtime.server_log_path, "server.log")
                 self._write_bundle_log(archive, self.runtime.server_error_log_path, "server.err.log")
         finally:
-            db_backup_path.unlink(missing_ok=True)
-        if backup_error:
-            return {
-                "filename": bundle_path.name,
-                "path": str(bundle_path),
-                "byte_count": bundle_path.stat().st_size,
-                "download_url": f"/diagnostics/state-bundles/{bundle_path.name}",
-                "warning": backup_error,
-            }
-        return {
+            cleanup_error = self._remove_temp_bundle_file(db_backup_path)
+        result = {
             "filename": bundle_path.name,
             "path": str(bundle_path),
             "byte_count": bundle_path.stat().st_size,
             "download_url": f"/diagnostics/state-bundles/{bundle_path.name}",
         }
+        warnings = [warning for warning in (backup_error, cleanup_error) if warning]
+        if warnings:
+            result["warning"] = "; ".join(warnings)
+        return result
 
     def _export_path(self, output_path: Path) -> Path:
         """Purpose: keep data-relative exports outside bundled app folders."""
@@ -197,6 +194,15 @@ class PlanCommissionWorkbench:
             return self.store.list_runs(limit=10)
         except Exception as exc:
             return {"error": str(exc)}
+
+    def _remove_temp_bundle_file(self, path: Path) -> str | None:
+        """Purpose: avoid failing diagnostics after the zip already exists."""
+
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"Temporary backup cleanup failed for {path.name}: {exc}"
+        return None
 
     def _write_bundle_log(self, archive: zipfile.ZipFile, path: Path, arcname: str) -> None:
         """Purpose: include desktop logs when they exist without failing the bundle."""
