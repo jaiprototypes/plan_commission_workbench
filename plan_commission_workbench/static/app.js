@@ -245,6 +245,20 @@ function contactBlock(title, prefix, row) {
   `;
 }
 
+const REVIEW_CONTACTS = [
+  ["Applicant", "applicant"],
+  ["Project Contact", "project_contact"],
+  ["Owner", "owner"],
+];
+
+const REVIEW_CONTACT_FIELDS = [
+  ["name", "Name", "input"],
+  ["company", "Company", "input"],
+  ["mailing_address", "Mailing address", "textarea"],
+  ["phone", "Phone", "input"],
+  ["email", "Email", "input"],
+];
+
 function qualityNotice(row) {
   const issues = qualityIssues(row);
   if (!issues.length) return "";
@@ -253,6 +267,100 @@ function qualityNotice(row) {
     <div class="notice warning">
       <strong>QC review required</strong>
       <ul>${items}</ul>
+    </div>
+  `;
+}
+
+function reviewEditor(row) {
+  return `
+    <div class="review-editor">
+      ${reviewProjectSection(row)}
+      ${REVIEW_CONTACTS.map(([title, prefix]) => reviewContactSection(title, prefix, row)).join("")}
+    </div>
+  `;
+}
+
+function reviewProjectSection(row) {
+  return `
+    <section class="review-section">
+      <h3>Project</h3>
+      <div class="review-field-grid review-project-grid">
+        ${targetProjectSelect(row)}
+        ${reviewField(row, "section5_description", "Section 5", "textarea")}
+        ${reviewField(row, "unit_count", "Units", "input")}
+      </div>
+    </section>
+  `;
+}
+
+function reviewContactSection(title, prefix, row) {
+  const fields = REVIEW_CONTACT_FIELDS
+    .map(([suffix, label, kind]) => reviewField(row, `${prefix}_${suffix}`, label, kind))
+    .join("");
+  return `
+    <section class="review-section">
+      <h3>${title}</h3>
+      <div class="review-field-grid">${fields}</div>
+    </section>
+  `;
+}
+
+function reviewField(row, field, label, kind) {
+  const value = fieldValue(row, field);
+  if (kind === "textarea") {
+    return `
+      <label>
+        ${label}
+        <textarea data-review-field="${row.id}" data-field="${field}">${escapeHtml(value)}</textarea>
+      </label>
+    `;
+  }
+  return `
+    <label>
+      ${label}
+      <input data-review-field="${row.id}" data-field="${field}" value="${escapeHtml(value)}">
+    </label>
+  `;
+}
+
+function targetProjectSelect(row) {
+  const value = targetProjectValue(row);
+  return `
+    <label>
+      Target
+      <select data-review-field="${row.id}" data-field="target_project">
+        <option value=""${value === "" ? " selected" : ""}>Unknown</option>
+        <option value="true"${value === "true" ? " selected" : ""}>Yes</option>
+        <option value="false"${value === "false" ? " selected" : ""}>No</option>
+      </select>
+    </label>
+  `;
+}
+
+function fieldValue(row, field) {
+  return row[field] ?? "";
+}
+
+function targetProjectValue(row) {
+  if (row.target_project === true || row.target_project === 1 || row.target_project === "1") return "true";
+  if (row.target_project === false || row.target_project === 0 || row.target_project === "0") return "false";
+  return "";
+}
+
+function targetProjectLabel(row) {
+  const value = targetProjectValue(row);
+  if (value === "true") return "Yes";
+  if (value === "false") return "No";
+  return "Unknown";
+}
+
+function reviewActions(row) {
+  return `
+    <div class="review-actions">
+      <input data-notes="${row.id}" placeholder="Notes" value="${escapeHtml(row.notes)}">
+      <button class="secondary" data-save="${row.id}" type="button">Save changes</button>
+      <button data-accept="${row.id}" type="button">Accept</button>
+      <button data-reject="${row.id}" class="danger" type="button">Reject</button>
     </div>
   `;
 }
@@ -310,14 +418,8 @@ function applicationCard(row, review = false) {
   const warnings = qualityNotice(row);
   const duplicates = duplicateNotice(row);
   const agendaItem = review ? agendaItemLink(row) : `Item ${escapeHtml(row.city_item_id)}`;
-  const actions = review ? `
-    <div class="review-actions">
-      <textarea data-corrections="${row.id}" placeholder='{"applicant_name":"Corrected value"}'></textarea>
-      <input data-notes="${row.id}" placeholder="Notes">
-      <button data-accept="${row.id}" type="button">Accept</button>
-      <button data-reject="${row.id}" class="danger" type="button">Reject</button>
-    </div>
-  ` : "";
+  const details = review ? reviewEditor(row) : applicationDetails(row);
+  const actions = review ? reviewActions(row) : "";
   return `
     <article class="card ${qualityIssues(row).length ? "card-warning" : ""}">
       <div class="card-head">
@@ -326,19 +428,25 @@ function applicationCard(row, review = false) {
       </div>
       ${warnings}
       ${duplicates}
-      <div class="fields">
-        ${contactBlock("Applicant", "applicant", row)}
-        ${contactBlock("Project Contact", "project_contact", row)}
-        ${contactBlock("Owner", "owner", row)}
-      </div>
-      <div class="evidence">
-        <p><strong>Target:</strong> ${row.target_project === 0 ? "No" : row.target_project === 1 ? "Yes" : "Unknown"} ${row.target_reason ? `- ${escapeHtml(row.target_reason)}` : ""}</p>
-        <p><strong>Section 5:</strong> ${escapeHtml(row.section5_description)}</p>
-        <p><strong>Units:</strong> ${escapeHtml(row.unit_count)}</p>
-      </div>
+      ${details}
       ${rawAttributes}
       ${actions}
     </article>
+  `;
+}
+
+function applicationDetails(row) {
+  return `
+    <div class="fields">
+      ${contactBlock("Applicant", "applicant", row)}
+      ${contactBlock("Project Contact", "project_contact", row)}
+      ${contactBlock("Owner", "owner", row)}
+    </div>
+    <div class="evidence">
+      <p><strong>Target:</strong> ${targetProjectLabel(row)} ${row.target_reason ? `- ${escapeHtml(row.target_reason)}` : ""}</p>
+      <p><strong>Section 5:</strong> ${escapeHtml(row.section5_description)}</p>
+      <p><strong>Units:</strong> ${escapeHtml(row.unit_count)}</p>
+    </div>
   `;
 }
 
@@ -374,16 +482,30 @@ async function loadApplications() {
 }
 
 async function submitReview(id, status) {
-  const correctionText = document.querySelector(`[data-corrections="${id}"]`)?.value.trim();
   const notes = document.querySelector(`[data-notes="${id}"]`)?.value.trim();
-  let corrected_fields = {};
-  if (correctionText) corrected_fields = JSON.parse(correctionText);
+  const corrected_fields = collectReviewFields(id);
   await getJson(`/application-extractions/${id}/review`, {
     method: "PATCH",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({status, corrected_fields, notes}),
   });
   await loadReview();
+}
+
+function collectReviewFields(id) {
+  const corrected = {};
+  document.querySelectorAll(`[data-review-field="${id}"][data-field]`).forEach((input) => {
+    const field = input.dataset.field;
+    const value = input.value.trim();
+    corrected[field] = field === "target_project" ? targetProjectCorrection(value) : value;
+  });
+  return corrected;
+}
+
+function targetProjectCorrection(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
 }
 
 async function loadReview() {
@@ -395,6 +517,9 @@ async function loadReview() {
   ]);
   const rows = [...reviewRows, ...extractedRows];
   list.innerHTML = rows.map((row) => applicationCard(row, true)).join("");
+  list.querySelectorAll("[data-save]").forEach((button) => {
+    button.addEventListener("click", () => submitReview(button.dataset.save, "needs_operator_review").catch(alert));
+  });
   list.querySelectorAll("[data-accept]").forEach((button) => {
     button.addEventListener("click", () => submitReview(button.dataset.accept, "accepted").catch(alert));
   });

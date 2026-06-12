@@ -554,6 +554,79 @@ def test_review_acceptance_rejects_uncertain_or_unmailable_rows(tmp_path) -> Non
     assert store.list_application_extractions(statuses.ACCEPTED)[0]["id"] == extraction_id
 
 
+def test_saved_review_corrections_clear_qc_and_accept_later(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="1",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("1", "1002", "9002", dt.date(2026, 1, 2), "Construct apartments"),
+        AgendaClassification("1002", statuses.AGENDA_HIT, 0.9, "Housing", "Construct apartments"),
+    )
+    app_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="1",
+        file_id="9002",
+        attachment_id="b",
+        source_url="https://example.test/application-b.pdf",
+        content_hash="app-hash-b",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url="https://example.test/application-b.pdf",
+            attachment_id="b",
+            applicant=ContactFields(name="Applicant name Jane Raw"),
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="Construct apartments.",
+            unit_count=None,
+            status=statuses.NEEDS_OPERATOR_REVIEW,
+            target_project=None,
+        ),
+    )
+
+    store.review_application(
+        extraction_id,
+        statuses.NEEDS_OPERATOR_REVIEW,
+        {
+            "target_project": True,
+            "applicant_name": "",
+            "applicant_company": "Known Developer LLC",
+            "applicant_mailing_address": "123 Main Street, Madison, WI 53703",
+        },
+        "Corrected by operator",
+    )
+    corrected = store.list_application_extractions(statuses.NEEDS_OPERATOR_REVIEW)[0]
+
+    assert corrected["quality_issues"] == []
+    assert corrected["applicant_name"] == ""
+    assert corrected["applicant_company"] == "Known Developer LLC"
+    assert corrected["notes"] == "Corrected by operator"
+
+    store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
+    accepted = store.list_application_extractions(statuses.ACCEPTED)[0]
+
+    assert accepted["id"] == extraction_id
+    assert accepted["applicant_company"] == "Known Developer LLC"
+    assert accepted["quality_issues"] == []
+
+
 def test_review_rows_report_duplicate_accepted_contacts(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()

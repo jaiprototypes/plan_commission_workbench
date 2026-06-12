@@ -415,6 +415,51 @@ th {
   margin-top: 8px;
 }
 
+.review-editor {
+  display: grid;
+  gap: 9px;
+}
+
+.review-section {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.review-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.review-section h3 {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.review-field-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.review-project-grid {
+  grid-template-columns: 140px minmax(240px, 1fr) 90px;
+}
+
+.review-field-grid input,
+.review-field-grid select,
+.review-field-grid textarea {
+  font-size: 13px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+.review-field-grid textarea {
+  min-height: 56px;
+}
+
 .notice {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -487,17 +532,13 @@ th {
   align-items: stretch;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(240px, 1fr) minmax(180px, 0.5fr) auto auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
   margin-top: 10px;
 }
 
 .review-actions input,
 .review-actions button {
   min-height: 34px;
-}
-
-.review-actions textarea {
-  min-height: 58px;
 }
 
 @media (max-width: 850px) {
@@ -512,6 +553,8 @@ th {
   .run-form,
   .export-form,
   .fields,
+  .review-field-grid,
+  .review-project-grid,
   .review-actions {
     grid-template-columns: 1fr;
   }

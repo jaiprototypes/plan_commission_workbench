@@ -105,8 +105,21 @@ def test_review_cards_use_compact_professional_spacing() -> None:
 
     assert ".card-head strong" in styles
     assert "font-size: 11px" in styles
-    assert ".review-actions textarea" in styles
-    assert "min-height: 58px" in styles
+    assert ".review-editor" in styles
+    assert ".review-field-grid textarea" in styles
+    assert "min-height: 56px" in styles
+
+
+def test_review_ui_uses_editable_fields_for_corrections() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "reviewEditor" in script
+    assert "REVIEW_CONTACT_FIELDS" in script
+    assert "targetProjectSelect" in script
+    assert "collectReviewFields" in script
+    assert "data-review-field" in script
+    assert "data-save" in script
+    assert "data-corrections" not in script
 
 
 def test_review_js_downloads_workbook_exports() -> None:

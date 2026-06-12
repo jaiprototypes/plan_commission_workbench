@@ -953,9 +953,11 @@ class ReviewStore:
             rows = conn.execute(
                 f"""
                 SELECT app.*, agenda.event_id, agenda.city_item_id, agenda.file_id, agenda.meeting_date,
-                       agenda.description AS agenda_description, agenda.classification AS agenda_classification
+                       agenda.description AS agenda_description, agenda.classification AS agenda_classification,
+                       review.corrected_fields_json, review.notes
                 FROM application_extractions app
                 JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+                LEFT JOIN operator_reviews review ON review.extraction_id = app.id
                 {where}
                 ORDER BY agenda.meeting_date DESC, app.id DESC
                 """,
@@ -967,9 +969,11 @@ class ReviewStore:
         """Purpose: attach QC and duplicate-contact context for review screens."""
 
         accepted = self._accepted_contact_index(conn)
-        for row in rows:
+        for index, row in enumerate(rows):
+            row = self._apply_corrections(row)
             row["quality_issues"] = application_quality_issues(row)
             row["duplicate_contacts"] = self._duplicate_contacts(row, accepted)
+            rows[index] = row
         return rows
 
     def _accepted_contact_index(self, conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -1046,13 +1050,16 @@ class ReviewStore:
 
         if status not in {statuses.ACCEPTED, statuses.REJECTED, statuses.NEEDS_OPERATOR_REVIEW}:
             raise ValueError(f"Unsupported review status: {status}")
-        corrected_json = json.dumps(corrected_fields or {}, sort_keys=True)
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM application_extractions WHERE id = ?", (extraction_id,)).fetchone()
             if not row:
                 raise KeyError(f"Application extraction {extraction_id} not found")
+            existing_fields, existing_notes = self._stored_review(conn, extraction_id)
+            merged_fields = {**existing_fields, **(corrected_fields or {})}
+            corrected_json = json.dumps(merged_fields, sort_keys=True)
+            review_notes = existing_notes if notes is None else notes
             if status == statuses.ACCEPTED:
-                effective = self._review_effective_row(conn, dict(row), corrected_fields or {})
+                effective = self._review_effective_row(conn, dict(row), merged_fields)
                 issues = application_quality_issues(effective)
                 if issues:
                     raise ValueError(f"Cannot accept until QC is resolved: {'; '.join(issues)}")
@@ -1068,9 +1075,24 @@ class ReviewStore:
                     notes = excluded.notes,
                     reviewed_timestamp = excluded.reviewed_timestamp
                 """,
-                (extraction_id, status, corrected_json, notes, _now()),
+                (extraction_id, status, corrected_json, review_notes, _now()),
             )
         return self.list_application_extractions()[0] if False else {"id": extraction_id, "status": status}
+
+    def _stored_review(self, conn: sqlite3.Connection, extraction_id: int) -> tuple[dict[str, Any], str | None]:
+        """Purpose: reuse saved operator corrections across save-then-accept flows."""
+
+        row = conn.execute(
+            "SELECT corrected_fields_json, notes FROM operator_reviews WHERE extraction_id = ?",
+            (extraction_id,),
+        ).fetchone()
+        if not row:
+            return {}, None
+        try:
+            fields = json.loads(row["corrected_fields_json"] or "{}")
+        except json.JSONDecodeError:
+            fields = {}
+        return fields if isinstance(fields, dict) else {}, row["notes"]
 
     def _review_effective_row(
         self,
@@ -1114,7 +1136,7 @@ class ReviewStore:
         except json.JSONDecodeError:
             return row
         for key, value in corrections.items():
-            if key in row and value not in (None, ""):
+            if key in row:
                 row[key] = value
         return row
 
