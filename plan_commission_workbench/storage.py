@@ -17,6 +17,28 @@ from .quality import CONTACT_PREFIXES, application_quality_issues, contact_key, 
 from .segmentation import trim_non_item_tail
 
 
+APPLICATION_REVIEW_FIELDS = (
+    "applicant_name",
+    "applicant_company",
+    "applicant_mailing_address",
+    "applicant_phone",
+    "applicant_email",
+    "project_contact_name",
+    "project_contact_company",
+    "project_contact_mailing_address",
+    "project_contact_phone",
+    "project_contact_email",
+    "owner_name",
+    "owner_company",
+    "owner_mailing_address",
+    "owner_phone",
+    "owner_email",
+    "section5_description",
+    "unit_count",
+    "target_project",
+)
+
+
 def _now() -> str:
     """Purpose: produce compact UTC timestamps for SQLite rows."""
 
@@ -95,6 +117,7 @@ class ReviewStore:
             self._ensure_columns(conn)
             self._normalize_stored_agenda_statuses(conn)
             self._normalize_stored_application_statuses(conn)
+            self._materialize_stored_review_corrections(conn)
             self._refresh_all_run_counters(conn)
 
     def backup_to(self, destination: Path) -> Path:
@@ -207,6 +230,26 @@ class ReviewStore:
             """,
             (statuses.NEEDS_OPERATOR_REVIEW, _now(), statuses.APPLICATION_EXTRACTED, statuses.AGENDA_HIT),
         )
+
+    def _materialize_stored_review_corrections(self, conn: sqlite3.Connection) -> None:
+        """Purpose: upgrade old DBs so accepted rows carry final corrected values."""
+
+        rows = conn.execute(
+            """
+            SELECT app.id, review.corrected_fields_json
+            FROM application_extractions app
+            JOIN operator_reviews review ON review.extraction_id = app.id
+            WHERE app.status IN (?, ?)
+            """,
+            (statuses.ACCEPTED, statuses.NEEDS_OPERATOR_REVIEW),
+        ).fetchall()
+        for row in rows:
+            try:
+                corrected_fields = json.loads(row["corrected_fields_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(corrected_fields, dict):
+                self._materialize_application_corrections(conn, int(row["id"]), corrected_fields)
 
     def _mailable_contact_sql(self) -> str:
         """Purpose: mirror contact QC in SQLite startup migration SQL."""
@@ -1063,6 +1106,8 @@ class ReviewStore:
                 issues = application_quality_issues(effective)
                 if issues:
                     raise ValueError(f"Cannot accept until QC is resolved: {'; '.join(issues)}")
+            if status in {statuses.ACCEPTED, statuses.NEEDS_OPERATOR_REVIEW}:
+                self._materialize_application_corrections(conn, extraction_id, merged_fields)
             conn.execute("UPDATE application_extractions SET status = ?, updated_at = ? WHERE id = ?", (status, _now(), extraction_id))
             conn.execute(
                 """
@@ -1093,6 +1138,66 @@ class ReviewStore:
         except json.JSONDecodeError:
             fields = {}
         return fields if isinstance(fields, dict) else {}, row["notes"]
+
+    def _materialize_application_corrections(
+        self,
+        conn: sqlite3.Connection,
+        extraction_id: int,
+        corrected_fields: dict[str, Any],
+    ) -> None:
+        """Purpose: make operator-approved values the canonical application row."""
+
+        values = self._application_correction_values(corrected_fields)
+        if not values:
+            return
+        assignments = ", ".join(f"{field} = ?" for field in values)
+        conn.execute(
+            f"UPDATE application_extractions SET {assignments}, updated_at = ? WHERE id = ?",
+            (*values.values(), _now(), extraction_id),
+        )
+
+    def _application_correction_values(self, corrected_fields: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: coerce review form values into SQLite application columns."""
+
+        values: dict[str, Any] = {}
+        for field in APPLICATION_REVIEW_FIELDS:
+            if field not in corrected_fields:
+                continue
+            value = corrected_fields[field]
+            if field == "target_project":
+                values[field] = self._target_project_value(value)
+            elif field == "unit_count":
+                values[field] = self._unit_count_value(value)
+            else:
+                values[field] = "" if value is None else str(value).strip()
+        return values
+
+    def _target_project_value(self, value: Any) -> int | None:
+        """Purpose: store operator target choices as SQLite booleans."""
+
+        if isinstance(value, bool):
+            return int(value)
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes"}:
+            return 1
+        if normalized in {"0", "false", "no"}:
+            return 0
+        return None
+
+    def _unit_count_value(self, value: Any) -> int | str | None:
+        """Purpose: preserve unit evidence while normalizing ordinary numbers."""
+
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return text
 
     def _review_effective_row(
         self,

@@ -618,6 +618,19 @@ def test_saved_review_corrections_clear_qc_and_accept_later(tmp_path) -> None:
     assert corrected["applicant_name"] == ""
     assert corrected["applicant_company"] == "Known Developer LLC"
     assert corrected["notes"] == "Corrected by operator"
+    with store.transaction() as conn:
+        stored = conn.execute(
+            """
+            SELECT applicant_name, applicant_company, applicant_mailing_address, target_project
+            FROM application_extractions
+            WHERE id = ?
+            """,
+            (extraction_id,),
+        ).fetchone()
+    assert stored["applicant_name"] == ""
+    assert stored["applicant_company"] == "Known Developer LLC"
+    assert stored["applicant_mailing_address"] == "123 Main Street, Madison, WI 53703"
+    assert stored["target_project"] == 1
 
     store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
     accepted = store.list_application_extractions(statuses.ACCEPTED)[0]
@@ -625,6 +638,106 @@ def test_saved_review_corrections_clear_qc_and_accept_later(tmp_path) -> None:
     assert accepted["id"] == extraction_id
     assert accepted["applicant_company"] == "Known Developer LLC"
     assert accepted["quality_issues"] == []
+
+    result = ExportService(store).export(tmp_path / "labels.docx", statuses.ACCEPTED)
+    label_text = _docx_text(tmp_path / "labels.docx")
+
+    assert result["row_count"] == 1
+    assert "Known Developer LLC" in label_text
+    assert "123 Main Street, Madison, WI 53703" in label_text
+    assert "Applicant name Jane Raw" not in label_text
+
+
+def test_initialize_materializes_historical_review_corrections(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="1",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("1", "1003", "9003", dt.date(2026, 1, 3), "Construct apartments"),
+        AgendaClassification("1003", statuses.AGENDA_HIT, 0.9, "Housing", "Construct apartments"),
+    )
+    app_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="1",
+        file_id="9003",
+        attachment_id="c",
+        source_url="https://example.test/application-c.pdf",
+        content_hash="app-hash-c",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url="https://example.test/application-c.pdf",
+            attachment_id="c",
+            applicant=ContactFields(name="Applicant name Historical Raw"),
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="Construct apartments.",
+            unit_count=None,
+            status=statuses.ACCEPTED,
+            target_project=True,
+        ),
+    )
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO operator_reviews
+            (extraction_id, status, corrected_fields_json, notes, reviewed_timestamp)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                extraction_id,
+                statuses.ACCEPTED,
+                json.dumps(
+                    {
+                        "applicant_name": "Historical Corrected",
+                        "applicant_company": "Historical Housing LLC",
+                        "applicant_mailing_address": "789 East Main Street, Madison, WI 53703",
+                    }
+                ),
+                "old client correction",
+                "2026-01-03T00:00:00Z",
+            ),
+        )
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+    row = reopened.list_application_extractions(statuses.ACCEPTED)[0]
+
+    assert row["applicant_name"] == "Historical Corrected"
+    assert row["applicant_company"] == "Historical Housing LLC"
+    with reopened.transaction() as conn:
+        stored = conn.execute(
+            "SELECT applicant_name, applicant_company, applicant_mailing_address FROM application_extractions WHERE id = ?",
+            (extraction_id,),
+        ).fetchone()
+    assert stored["applicant_name"] == "Historical Corrected"
+    assert stored["applicant_company"] == "Historical Housing LLC"
+
+    result = ExportService(reopened).export(tmp_path / "historical-labels.docx", statuses.ACCEPTED)
+    label_text = _docx_text(tmp_path / "historical-labels.docx")
+
+    assert result["row_count"] == 1
+    assert "Historical Corrected" in label_text
+    assert "Historical Housing LLC" in label_text
+    assert "Applicant name Historical Raw" not in label_text
 
 
 def test_review_rows_report_duplicate_accepted_contacts(tmp_path) -> None:
