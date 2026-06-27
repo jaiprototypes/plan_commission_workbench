@@ -708,6 +708,41 @@ class ReviewStore:
             ).fetchone()
             return bool(row and row["total"])
 
+    def completed_application_source(self, source_url: str | None, attachment_id: str | None) -> dict[str, Any] | None:
+        """Purpose: find final application work already done for one Legistar source."""
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_url:
+            clauses.append("app.source_url = ?")
+            params.append(source_url)
+        if attachment_id:
+            clauses.append("app.attachment_id = ?")
+            params.append(attachment_id)
+        if not clauses:
+            return None
+        params.extend(
+            (
+                statuses.APPLICATION_EXTRACTED,
+                statuses.NEEDS_OPERATOR_REVIEW,
+                statuses.ACCEPTED,
+                statuses.REJECTED,
+            )
+        )
+        with self.transaction() as conn:
+            row = conn.execute(
+                f"""
+                SELECT app.*, agenda.event_id, agenda.city_item_id, agenda.meeting_date
+                FROM application_extractions app
+                JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+                WHERE ({' OR '.join(clauses)}) AND app.status IN (?, ?, ?, ?)
+                ORDER BY app.updated_at DESC, app.id DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            return dict(row) if row else None
+
     def upsert_agenda_item(
         self,
         run_id: int,
@@ -974,7 +1009,7 @@ class ReviewStore:
         """Purpose: keep evidence current with the latest extraction."""
 
         conn.execute("DELETE FROM field_evidence WHERE extraction_id = ?", (extraction_id,))
-        for item in evidence:
+        for item in self._unique_field_evidence(evidence):
             conn.execute(
                 """
                 INSERT INTO field_evidence
@@ -983,6 +1018,32 @@ class ReviewStore:
                 """,
                 (extraction_id, item.field_name, None if item.value is None else str(item.value), item.evidence_snippet, item.confidence),
             )
+
+    def _unique_field_evidence(self, evidence: tuple[FieldEvidence, ...]) -> tuple[FieldEvidence, ...]:
+        """Purpose: collapse repeated LLM evidence keys before SQLite insert."""
+
+        by_field: dict[str, FieldEvidence] = {}
+        for item in evidence:
+            field_name = item.field_name.strip()
+            if not field_name:
+                continue
+            normalized = item if field_name == item.field_name else FieldEvidence(
+                field_name,
+                item.value,
+                item.evidence_snippet,
+                item.confidence,
+            )
+            current = by_field.get(field_name)
+            if current is None or self._evidence_score(normalized) >= self._evidence_score(current):
+                by_field[field_name] = normalized
+        return tuple(by_field.values())
+
+    def _evidence_score(self, item: FieldEvidence) -> tuple[float, bool, bool]:
+        """Purpose: prefer confident evidence with useful value and source text."""
+
+        has_value = item.value is not None and str(item.value).strip() != ""
+        has_snippet = item.evidence_snippet.strip() != ""
+        return (item.confidence, has_value, has_snippet)
 
     def list_application_extractions(self, status: str | None = None) -> list[dict[str, Any]]:
         """Purpose: fetch application rows with agenda context."""

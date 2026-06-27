@@ -385,6 +385,65 @@ def test_application_sources_allow_duplicate_content_hashes(tmp_path) -> None:
     assert [row[0] for row in rows] == [first, second]
 
 
+def test_duplicate_field_evidence_is_collapsed_before_insert(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    agenda_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="1",
+        file_id=None,
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        agenda_source,
+        AgendaSegment("1", "1001", "9001", dt.date(2026, 1, 1), "Construct apartments"),
+        AgendaClassification("1001", statuses.AGENDA_HIT, 0.9, "Housing", "Construct apartments"),
+    )
+    app_source = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="application",
+        event_id="1",
+        file_id="9001",
+        attachment_id="a",
+        source_url="https://example.test/application.pdf",
+        content_hash="app-hash",
+        processing_status=statuses.APPLICATION_EXTRACTED,
+    )
+
+    extraction_id = store.upsert_application_extraction(
+        run_id,
+        app_source,
+        ApplicationExtraction(
+            agenda_item_id=agenda_id,
+            source_url="https://example.test/application.pdf",
+            attachment_id="a",
+            applicant=ContactFields(name="Jane Applicant"),
+            project_contact=ContactFields(),
+            owner=ContactFields(),
+            section5_description="Construct 48 units.",
+            unit_count=48,
+            status=statuses.APPLICATION_EXTRACTED,
+            target_project=True,
+            evidence=(
+                FieldEvidence("unit_count", 48, "low-confidence unit text", 0.4),
+                FieldEvidence("unit_count", 48, "high-confidence unit text", 0.95),
+                FieldEvidence(" applicant.name ", "Jane Applicant", "Jane Applicant", 0.9),
+            ),
+        ),
+    )
+
+    evidence = store.get_field_evidence(extraction_id)
+
+    assert [row["field_name"] for row in evidence] == ["applicant.name", "unit_count"]
+    assert [row for row in evidence if row["field_name"] == "unit_count"][0]["evidence_snippet"] == "high-confidence unit text"
+
+
 def test_startup_migration_downgrades_public_comment_hits_and_counters(tmp_path) -> None:
     db_path = tmp_path / "workbench.db"
     store = ReviewStore(db_path)

@@ -10,7 +10,7 @@ from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.docling_adapter import DoclingTextExtractor, DoclingTextResult
 from plan_commission_workbench.exceptions import DoclingExtractionError
 from plan_commission_workbench.llm import LLMJsonClient
-from plan_commission_workbench.models import AgendaClassification, AgendaSegment, DownloadedFile, EventRecord, RunRequest
+from plan_commission_workbench.models import AttachmentRecord, AgendaClassification, AgendaSegment, DownloadedFile, EventRecord, RunRequest
 from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench.storage import ReviewStore
 
@@ -80,6 +80,23 @@ class FakeLegistar:
         payload = url.encode("utf-8")
         destination.write_bytes(payload)
         return DownloadedFile(destination, hashlib.sha256(payload).hexdigest())
+
+
+class DuplicateAttachmentLegistar(FakeLegistar):
+    """Purpose: reproduce one application PDF attached to multiple agenda hits."""
+
+    def fetch_event_items(self, event_id, progress_callback=None):
+        return []
+
+    def find_application_attachment(self, agenda_item, event_items):
+        return AttachmentRecord(
+            agenda_item_id=int(agenda_item["id"]),
+            city_item_id=str(agenda_item["city_item_id"]),
+            file_id=str(agenda_item.get("file_id") or ""),
+            attachment_id="171817",
+            source_url=APP_URL,
+            name="Land Use Application.pdf",
+        )
 
 
 class FakeDocling(DoclingTextExtractor):
@@ -333,6 +350,45 @@ def test_overlapping_ranges_reuse_existing_rows_and_process_new_dates(tmp_path) 
     assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 2
     assert legistar.downloads == 4
     assert docling.calls == 4
+
+
+def test_application_queue_skips_reused_attachment_across_agenda_items(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = DuplicateAttachmentLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27999",
+        file_id=None,
+        attachment_id=None,
+        source_url=AGENDA_URL,
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    for event_id, city_item_id, meeting_date in (
+        ("27999", "96005", dt.date(2026, 6, 1)),
+        ("28000", "97005", dt.date(2026, 6, 2)),
+    ):
+        workbench.store.upsert_agenda_item(
+            run_id,
+            source_id,
+            AgendaSegment(event_id, city_item_id, city_item_id, meeting_date, "Construct apartments"),
+            AgendaClassification(city_item_id, statuses.AGENDA_HIT, 0.95, "Housing", "apartments"),
+        )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2026, 6, 1), dt.date(2026, 6, 2)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    stages = [event["stage"] for event in workbench.store.list_run_events(run_id)]
+    assert legistar.downloads == 1
+    assert docling.calls == 1
+    assert "application_skip_source_reused" in stages
+    assert len(workbench.store.list_application_extractions()) == 1
 
 
 def test_docling_failure_stops_run_and_cleans_temp_files(tmp_path) -> None:

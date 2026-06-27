@@ -55,6 +55,9 @@ def test_windows_build_explicitly_bundles_server_module() -> None:
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "build_windows.ps1"
     script = script_path.read_text(encoding="utf-8")
 
+    assert "--onedir" in script
+    assert "--onefile" not in script
+    assert 'dist\\PlanCommissionWorkbench' in script
     assert '--hidden-import "plan_commission_workbench.docling_worker"' in script
     assert '--hidden-import "plan_commission_workbench.run_worker"' in script
     assert '--hidden-import "plan_commission_workbench.server"' in script

@@ -7,7 +7,8 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Venv = Join-Path $Root ".venv-win"
 $Python = Join-Path $Venv "Scripts\python.exe"
 $ArtifactDir = Join-Path $Root "artifacts"
-$ExePath = Join-Path $Root "dist\PlanCommissionWorkbench.exe"
+$AppDir = Join-Path $Root "dist\PlanCommissionWorkbench"
+$ExePath = Join-Path $AppDir "PlanCommissionWorkbench.exe"
 $ZipPath = Join-Path $ArtifactDir "PlanCommissionWorkbench-windows.zip"
 
 function New-Venv {
@@ -42,7 +43,7 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 & $Python -m PyInstaller `
     --noconfirm `
     --clean `
-    --onefile `
+    --onedir `
     --noconsole `
     --name "PlanCommissionWorkbench" `
     --add-data "plan_commission_workbench\templates;plan_commission_workbench\templates" `
@@ -70,6 +71,7 @@ if (-not (Test-Path $ExePath)) {
 
 & $ExePath --self-test-docling
 
+Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $AppDir "README.md")
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
-Compress-Archive -Path $ExePath, (Join-Path $Root "README.md") -DestinationPath $ZipPath
+Compress-Archive -Path $AppDir -DestinationPath $ZipPath
 Write-Host "Built $ZipPath"

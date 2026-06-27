@@ -74,6 +74,16 @@ class ApplicationPipeline:
         if self.store.application_complete(attachment.agenda_item_id, attachment.source_url, attachment.attachment_id):
             self.store.log_event(run_id, "application_skip", "application", identity, "Application already extracted by source identity")
             return
+        completed_source = self.store.completed_application_source(attachment.source_url, attachment.attachment_id)
+        if completed_source:
+            self.store.log_event(
+                run_id,
+                "application_skip_source_reused",
+                "application",
+                identity,
+                f"Application source already completed by extraction {completed_source['id']}",
+            )
+            return
         source_id = self.store.upsert_source_item(
             run_id=run_id,
             source_kind="application",

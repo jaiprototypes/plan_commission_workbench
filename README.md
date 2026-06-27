@@ -114,9 +114,13 @@ Build locally on Windows:
 .\scripts\build_windows.ps1
 ```
 
-The build writes `artifacts\PlanCommissionWorkbench-windows.zip`. The GitHub
-Actions workflow in `.github/workflows/windows-build.yml` builds the same
-artifact on pushes to `main`, pull requests, and manual workflow dispatch.
+The build writes `artifacts\PlanCommissionWorkbench-windows.zip`. Unzip the
+archive and run `PlanCommissionWorkbench\PlanCommissionWorkbench.exe` from the
+extracted folder. Keep the folder contents together; the build intentionally
+uses a directory layout so large native Docling/OCR dependencies do not expand
+into `%TEMP%` on every launch. The GitHub Actions workflow in
+`.github/workflows/windows-build.yml` builds the same artifact on pushes to
+`main`, pull requests, and manual workflow dispatch.
 
 ## Tests
 
