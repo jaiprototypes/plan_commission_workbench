@@ -43,8 +43,9 @@ class PlanCommissionWorkbench:
         self.store.initialize()
         self.legistar = legistar or LegistarClient("madison")
         self.docling = docling or DoclingTextExtractor()
-        self.llm = llm or LLMJsonClient()
         self.openai_keys = OpenAIKeyManager()
+        self.openai_keys.load_saved_key()
+        self.llm = llm or LLMJsonClient()
 
     def create_madison_run(self, date_from: dt.date, date_to: dt.date, request_text: str | None = None) -> int:
         """Purpose: create a run row before synchronous or background execution."""
@@ -293,12 +294,12 @@ class PlanCommissionWorkbench:
     def openai_status(self) -> dict[str, Any]:
         """Purpose: expose LLM readiness without making a model call."""
 
-        return self.llm.status()
+        return self.llm.status() | self.openai_keys.credential_status()
 
     def configure_openai_api_key(self, api_key: str) -> dict[str, Any]:
-        """Purpose: accept a local-session API key from the startup prompt."""
+        """Purpose: accept and locally save an API key from the prompt."""
 
-        self.openai_keys.set_process_key(api_key)
+        self.openai_keys.set_process_key(api_key, persist=True)
         return self.openai_status()
 
     def require_openai_api_key(self) -> None:

@@ -175,14 +175,16 @@ class DesktopLauncher:
         self.root.after(READY_DELAY_MS, self._wait_for_server)
 
     def prompt_for_key(self, silent_cancel: bool = False) -> None:
-        """Purpose: collect a credited OpenAI key without storing it on disk."""
+        """Purpose: collect and save a credited OpenAI key for local launches."""
 
         manager = OpenAIKeyManager()
+        if manager.load_saved_key():
+            return
         if manager.api_key_present():
             return
         api_key = self.simpledialog.askstring(
             APP_NAME,
-            "Enter a credited OpenAI API key for this session.\nIt is not saved into the app or written to disk.",
+            "Enter a credited OpenAI API key.\nIt is saved to this Windows user's Credential Manager when available.",
             show="*",
             parent=self.root,
         )
@@ -191,9 +193,16 @@ class DesktopLauncher:
                 self.messagebox.showwarning(APP_NAME, "OpenAI API key is still missing. Scrape runs will be blocked.")
             return
         try:
-            manager.set_process_key(api_key)
+            manager.set_process_key(api_key, persist=True)
         except ValueError as exc:
             self.messagebox.showerror(APP_NAME, str(exc))
+            return
+        if manager.credential_error:
+            self.messagebox.showwarning(
+                APP_NAME,
+                "OpenAI API key is active for this session, but it could not be saved locally.\n"
+                f"{manager.credential_error}",
+            )
 
     def _run_server(self) -> None:
         """Purpose: start FastAPI in the background and preserve failures."""

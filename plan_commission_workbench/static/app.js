@@ -56,7 +56,7 @@ async function loadHealth(options = {}) {
   const ready = openai.api_key_present && openai.package_available;
   node.className = `status-pill ${ready ? "ok" : "warn"}`;
   node.textContent = ready ? `OpenAI ${openai.model}` : openai.api_key_present ? "OpenAI package not ready" : "OpenAI key required";
-  node.title = ready ? "OpenAI is ready" : "Click to enter a credited OpenAI API key for this session";
+  node.title = ready ? "OpenAI is ready" : "Click to enter a credited OpenAI API key";
   if (!openai.api_key_present && options.prompt && !openAiKeyPromptShown) {
     openAiKeyPromptShown = true;
     await promptForOpenAiKey();
@@ -64,13 +64,16 @@ async function loadHealth(options = {}) {
 }
 
 async function promptForOpenAiKey() {
-  const apiKey = window.prompt("Enter a credited OpenAI API key for this workbench session:");
+  const apiKey = window.prompt("Enter a credited OpenAI API key. On Windows, it will be saved to this user's Credential Manager.");
   if (!apiKey) return;
-  await getJson("/settings/openai-api-key", {
+  const result = await getJson("/settings/openai-api-key", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({api_key: apiKey}),
   });
+  if (result.credential_error) {
+    window.alert(`OpenAI API key is active for this session, but it could not be saved locally.\n${result.credential_error}`);
+  }
   await loadHealth();
 }
 

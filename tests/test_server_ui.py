@@ -11,6 +11,7 @@ from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.models import AgendaClassification, AgendaSegment
 from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench.server import PACKAGE_ROOT, create_app
+from plan_commission_workbench.settings import OpenAIKeyManager
 from plan_commission_workbench.storage import ReviewStore
 
 
@@ -193,6 +194,38 @@ def test_server_can_set_openai_key_for_current_process(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["api_key_present"] is True
     assert os.getenv("OPENAI_API_KEY") == "sk-test"
+
+
+def test_server_persists_openai_key_through_key_manager(monkeypatch, tmp_path) -> None:
+    class FakeCredentialStore:
+        """Purpose: prove the settings endpoint saves through the manager."""
+
+        def __init__(self) -> None:
+            self.written_secret = None
+
+        def is_available(self) -> bool:
+            return True
+
+        def read_secret(self) -> str | None:
+            return None
+
+        def write_secret(self, secret: str) -> None:
+            self.written_secret = secret
+
+    store = FakeCredentialStore()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        "plan_commission_workbench.api.OpenAIKeyManager",
+        lambda: OpenAIKeyManager(credential_store=store),
+    )
+    client = TestClient(create_app(start_watchdog=False))
+
+    response = client.post("/settings/openai-api-key", json={"api_key": "sk-test"})
+
+    assert response.status_code == 200
+    assert response.json()["credential_saved"] is True
+    assert store.written_secret == "sk-test"
 
 
 def test_run_endpoint_spawns_child_worker(monkeypatch, tmp_path) -> None:

@@ -21,8 +21,10 @@ pip install -e .
 Set `OPENAI_API_KEY` to a credited OpenAI API key before live runs. LLM calls
 are required for agenda classification and application extraction. If the key is
 missing, terminal run/serve startup prompts for it when possible, and the local
-Run screen prompts for a session-only key in the browser. Docling is required for
-live PDF text extraction.
+Run screen prompts in the browser. On Windows, entered keys are saved to that
+Windows user's Credential Manager and loaded on later launches. The key is not
+embedded in the executable, committed to git, written to the workbench database,
+or included in state bundles. Docling is required for live PDF text extraction.
 
 ## CLI
 
@@ -103,8 +105,10 @@ timeouts, process-tree cleanup, and visible run-log heartbeats. Useful controls:
 The Windows launcher starts the local FastAPI server, opens the browser only
 after `/health` responds at `http://127.0.0.1:8010/`, and stores runtime data under
 `%LOCALAPPDATA%\PlanCommissionWorkbench\data`. It prompts for a credited OpenAI
-API key when the key is missing. The key is used only for that desktop session
-and is not embedded in the executable, committed to git, or written to disk.
+API key when the key is missing. The key is saved for that Windows user in
+Credential Manager when available, then loaded automatically on later launches.
+It is not embedded in the executable, committed to git, written to the workbench
+database, or included in state bundles.
 Packaged startup logs are written to `server.log` and `server.err.log` in that
 same data folder so server failures can be diagnosed without an IDE.
 
