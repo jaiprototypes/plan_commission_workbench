@@ -190,7 +190,8 @@ def test_automatic_failure_email_deduplicates_same_failure(tmp_path) -> None:
     assert second_events[-1]["stage"] == "diagnostic_email_duplicate_skipped"
 
 
-def test_oauth_diagnostic_email_uses_saved_api_token(tmp_path) -> None:
+def test_oauth_diagnostic_email_uses_saved_api_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PCW_GOOGLE_OAUTH_CLIENT_ID", "google-client-id")
     service, google_store, gmail_sender = make_oauth_service(tmp_path)
     token = OAuthToken(
         provider=GOOGLE_PROVIDER,
@@ -207,7 +208,6 @@ def test_oauth_diagnostic_email_uses_saved_api_token(tmp_path) -> None:
             smtp_host="",
             smtp_username="",
             oauth_email="sender@example.com",
-            google_client_id="google-client-id",
         )
     )
 
@@ -219,13 +219,13 @@ def test_oauth_diagnostic_email_uses_saved_api_token(tmp_path) -> None:
     assert "gmail-refresh-token" not in gmail_sender.messages[0]["body"]
 
 
-def test_oauth_start_builds_provider_authorization_url(tmp_path) -> None:
+def test_oauth_start_builds_provider_authorization_url(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PCW_GOOGLE_OAUTH_CLIENT_ID", "google-client-id")
     service, _google_store, _gmail_sender = make_oauth_service(tmp_path)
     service.configure(
         email_payload(
             delivery_method=GMAIL_DELIVERY_METHOD,
             smtp_password="",
-            google_client_id="google-client-id",
         )
     )
 

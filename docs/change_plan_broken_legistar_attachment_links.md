@@ -267,8 +267,9 @@ Email configuration:
 
 - Support recipient email.
 - Delivery method: Gmail OAuth, Microsoft OAuth, or SMTP fallback.
-- Gmail/Microsoft public OAuth client ID, preferably baked into the signed
-  Windows build from GitHub repository variables.
+- Gmail/Microsoft public OAuth client IDs must be developer-owned configuration
+  baked into the signed Windows build from GitHub repository variables. They
+  should not be entered or managed by the operator in the app UI.
 - SMTP host and port.
 - TLS mode.
 - SMTP username.
@@ -283,7 +284,10 @@ Email configuration:
 The SMTP password or OAuth refresh token must be saved in Windows Credential
 Manager. It must not be stored in SQLite, logs, state bundles, source control, or
 the packaged executable. OAuth client IDs are public identifiers, not secrets,
-but changing them changes which provider app owns future Gmail/Microsoft consent.
+but they are still developer configuration. Changing them changes which provider
+app owns future Gmail/Microsoft consent, so the customer-facing app should treat
+missing values as a broken build configuration rather than asking the operator to
+paste IDs.
 
 Credential clearing:
 
@@ -314,7 +318,9 @@ Security and privacy:
 Direct email responsibilities:
 
 1. Validate SMTP configuration before enabling automatic failure reports.
-2. Connect Gmail/Microsoft through the browser OAuth flow when selected.
+2. Connect Gmail/Microsoft through the browser OAuth flow when selected. The
+   operator should only see the provider sign-in and consent screen, not OAuth
+   client IDs or secrets.
 3. Send a small test email from the settings screen.
 4. Generate deterministic subject lines for grouping failures.
 5. Attach compact JSON/text diagnostics automatically.

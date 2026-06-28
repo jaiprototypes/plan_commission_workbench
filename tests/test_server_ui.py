@@ -56,20 +56,23 @@ def test_run_ui_exposes_diagnostic_email_and_secret_controls() -> None:
 
     assert "diagnostic-email-form" in template
     assert 'name="delivery_method"' in template
+    assert "Sign in with Gmail" in template
+    assert "Sign in with Microsoft" in template
+    assert "Advanced SMTP" in template
     assert "Connect Gmail" in template
     assert "Connect Microsoft" in template
     assert 'name="smtp_preset"' in template
-    assert "Google Workspace/Gmail" in template
-    assert "Microsoft 365/Outlook" in template
     assert "Yahoo Mail" in template
     assert "iCloud Mail" in template
     assert "Zoho Mail" in template
+    assert "Google OAuth Client ID" not in template
+    assert "Microsoft OAuth Client ID" not in template
     assert "clear-openai-key" in template
     assert "clear-email-secret" in template
     assert "clear-all-secrets" in template
     assert "smtpPresets" in script
-    assert "smtp.gmail.com" in script
-    assert "smtp.office365.com" in script
+    assert "smtp.gmail.com" not in script
+    assert "smtp.office365.com" not in script
     assert "smtp.mail.yahoo.com" in script
     assert "smtp.mail.me.com" in script
     assert "smtp.zoho.com" in script

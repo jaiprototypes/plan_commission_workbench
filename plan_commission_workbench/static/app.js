@@ -5,8 +5,6 @@ const SMTP_DELIVERY_METHOD = "smtp";
 const GMAIL_DELIVERY_METHOD = "gmail_oauth";
 const MICROSOFT_DELIVERY_METHOD = "microsoft_oauth";
 const smtpPresets = {
-  gmail: {host: "smtp.gmail.com", port: 587, useStarttls: true, useSsl: false},
-  microsoft365: {host: "smtp.office365.com", port: 587, useStarttls: true, useSsl: false},
   yahoo: {host: "smtp.mail.yahoo.com", port: 587, useStarttls: true, useSsl: false},
   icloud: {host: "smtp.mail.me.com", port: 587, useStarttls: true, useSsl: false},
   zoho: {host: "smtp.zoho.com", port: 587, useStarttls: true, useSsl: false},
@@ -100,8 +98,6 @@ async function loadDiagnosticEmailSettings() {
   form.elements.smtp_username.value = settings.smtp_username || "";
   form.elements.smtp_password.value = "";
   form.elements.sender.value = settings.sender || "";
-  form.elements.google_client_id.value = settings.google_client_id || "";
-  form.elements.microsoft_client_id.value = settings.microsoft_client_id || "";
   form.elements.enabled.checked = Boolean(settings.enabled);
   form.elements.use_ssl.checked = Boolean(settings.use_ssl);
   form.elements.use_starttls.checked = Boolean(settings.use_starttls);
@@ -114,8 +110,8 @@ async function loadDiagnosticEmailSettings() {
 
 function diagnosticEmailStatusText(settings) {
   if (settings.configured) return "Email ready";
-  if (settings.delivery_method === GMAIL_DELIVERY_METHOD && !settings.google_oauth_client_configured) return "Gmail OAuth client ID missing";
-  if (settings.delivery_method === MICROSOFT_DELIVERY_METHOD && !settings.microsoft_oauth_client_configured) return "Microsoft OAuth client ID missing";
+  if (settings.delivery_method === GMAIL_DELIVERY_METHOD && !settings.google_oauth_client_configured) return "Gmail sign-in not configured in this build";
+  if (settings.delivery_method === MICROSOFT_DELIVERY_METHOD && !settings.microsoft_oauth_client_configured) return "Microsoft sign-in not configured in this build";
   if (settings.oauth_token_saved) return "OAuth connected; settings incomplete";
   if (settings.credential_saved) return "Email settings incomplete";
   return "Email not configured";
@@ -127,11 +123,8 @@ function updateDiagnosticEmailMethodFields(form, settings = {}) {
   const isGmail = method === GMAIL_DELIVERY_METHOD;
   const isMicrosoft = method === MICROSOFT_DELIVERY_METHOD;
   document.querySelectorAll(".smtp-field").forEach((node) => node.classList.toggle("hidden", !isSmtp));
-  document.querySelectorAll(".oauth-field").forEach((node) => node.classList.toggle("hidden", isSmtp));
   $("#connect-gmail-oauth")?.classList.toggle("hidden", !isGmail);
   $("#connect-microsoft-oauth")?.classList.toggle("hidden", !isMicrosoft);
-  form.elements.google_client_id.closest("label")?.classList.toggle("hidden", !isGmail);
-  form.elements.microsoft_client_id.closest("label")?.classList.toggle("hidden", !isMicrosoft);
 }
 
 function setDiagnosticEmailPresetFromFields(form) {
@@ -168,8 +161,6 @@ function diagnosticEmailPayload(form) {
     smtp_username: form.elements.smtp_username.value.trim(),
     smtp_password: form.elements.smtp_password.value,
     sender: form.elements.sender.value.trim(),
-    google_client_id: form.elements.google_client_id.value.trim(),
-    microsoft_client_id: form.elements.microsoft_client_id.value.trim(),
     enabled: form.elements.enabled.checked,
     use_ssl: form.elements.use_ssl.checked,
     use_starttls: form.elements.use_starttls.checked,

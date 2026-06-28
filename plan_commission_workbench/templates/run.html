@@ -31,9 +31,9 @@
     <label>
       Send method
       <select name="delivery_method">
-        <option value="smtp">SMTP / app password</option>
-        <option value="gmail_oauth">Gmail OAuth</option>
-        <option value="microsoft_oauth">Microsoft OAuth</option>
+        <option value="gmail_oauth">Sign in with Gmail</option>
+        <option value="microsoft_oauth">Sign in with Microsoft</option>
+        <option value="smtp">Advanced SMTP</option>
       </select>
     </label>
     <label>
@@ -44,8 +44,6 @@
       SMTP preset
       <select name="smtp_preset">
         <option value="">Custom</option>
-        <option value="gmail">Google Workspace/Gmail</option>
-        <option value="microsoft365">Microsoft 365/Outlook</option>
         <option value="yahoo">Yahoo Mail</option>
         <option value="icloud">iCloud Mail</option>
         <option value="zoho">Zoho Mail</option>
@@ -70,14 +68,6 @@
     <label>
       Sender
       <input name="sender" type="email" placeholder="Optional">
-    </label>
-    <label class="oauth-field hidden">
-      Google OAuth Client ID
-      <input name="google_client_id" type="text" autocomplete="off" placeholder="Optional">
-    </label>
-    <label class="oauth-field hidden">
-      Microsoft OAuth Client ID
-      <input name="microsoft_client_id" type="text" autocomplete="off" placeholder="Optional">
     </label>
     <label class="inline-toggle">
       <input name="enabled" type="checkbox">

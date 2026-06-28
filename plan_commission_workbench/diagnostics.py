@@ -64,8 +64,6 @@ class DiagnosticEmailSettings:
     smtp_port: int = 587
     smtp_username: str = ""
     sender: str = ""
-    google_client_id: str = ""
-    microsoft_client_id: str = ""
     oauth_email: str = ""
     use_ssl: bool = False
     use_starttls: bool = True
@@ -83,8 +81,6 @@ class DiagnosticEmailSettings:
             smtp_port=int(raw.get("smtp_port") or 587),
             smtp_username=str(raw.get("smtp_username") or ""),
             sender=str(raw.get("sender") or ""),
-            google_client_id=str(raw.get("google_client_id") or ""),
-            microsoft_client_id=str(raw.get("microsoft_client_id") or ""),
             oauth_email=str(raw.get("oauth_email") or ""),
             use_ssl=bool(raw.get("use_ssl", False)),
             use_starttls=bool(raw.get("use_starttls", True)),
@@ -357,7 +353,7 @@ class DiagnosticEmailService:
         settings = self.settings_store.email_settings()
         client_id = self._oauth_client_id(provider, settings)
         if not client_id:
-            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} OAuth client ID is not configured")
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} sign-in is not configured in this build")
         pending = self.oauth_clients[provider].create_authorization_request(client_id=client_id, redirect_uri=redirect_uri)
         self._prune_pending_oauth()
         self.pending_oauth[pending.state] = pending
@@ -554,20 +550,12 @@ class DiagnosticEmailService:
         raise DiagnosticEmailError(f"Unsupported diagnostic email OAuth provider: {provider}")
 
     def _oauth_client_id(self, provider: str, settings: DiagnosticEmailSettings) -> str:
-        """Purpose: prefer local settings, then runtime env, then baked defaults."""
+        """Purpose: use developer-owned OAuth app IDs from build or env config."""
 
         if provider == GOOGLE_PROVIDER:
-            return (
-                settings.google_client_id.strip()
-                or os.getenv("PCW_GOOGLE_OAUTH_CLIENT_ID", "").strip()
-                or oauth_defaults.GOOGLE_CLIENT_ID.strip()
-            )
+            return os.getenv("PCW_GOOGLE_OAUTH_CLIENT_ID", "").strip() or oauth_defaults.GOOGLE_CLIENT_ID.strip()
         if provider == MICROSOFT_PROVIDER:
-            return (
-                settings.microsoft_client_id.strip()
-                or os.getenv("PCW_MICROSOFT_OAUTH_CLIENT_ID", "").strip()
-                or oauth_defaults.MICROSOFT_CLIENT_ID.strip()
-            )
+            return os.getenv("PCW_MICROSOFT_OAUTH_CLIENT_ID", "").strip() or oauth_defaults.MICROSOFT_CLIENT_ID.strip()
         return ""
 
     def _read_oauth_token(self, provider: str) -> OAuthToken:
@@ -597,7 +585,7 @@ class DiagnosticEmailService:
             return token
         client_id = self._oauth_client_id(provider, settings)
         if not client_id:
-            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} OAuth client ID is not configured")
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} sign-in is not configured in this build")
         refreshed = self.oauth_clients[provider].refresh_access_token(client_id=client_id, token=token)
         if not refreshed.email:
             refreshed.email = token.email

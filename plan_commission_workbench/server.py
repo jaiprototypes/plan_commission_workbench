@@ -56,8 +56,6 @@ class DiagnosticEmailRequest(BaseModel):
     smtp_username: str = ""
     smtp_password: str | None = None
     sender: str = ""
-    google_client_id: str = ""
-    microsoft_client_id: str = ""
     oauth_email: str = ""
     use_ssl: bool = False
     use_starttls: bool = True
