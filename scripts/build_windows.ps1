@@ -219,7 +219,8 @@ function New-MsixMappingFile {
         $sourcePath = [System.IO.Path]::GetFullPath($file.FullName)
         $relativePath = $sourcePath.Substring($sourceRoot.Length + 1)
         Assert-MsixPayloadPath $relativePath
-        $lines.Add('"{0}" "{1}"' -f $sourcePath, $relativePath)
+        $mappingLine = '"{0}" "{1}"' -f $sourcePath, $relativePath
+        $lines.Add($mappingLine)
     }
     Set-Content -Path $MappingPath -Value $lines -Encoding UTF8
 }

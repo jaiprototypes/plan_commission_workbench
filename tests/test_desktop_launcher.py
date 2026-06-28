@@ -115,6 +115,7 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "PCW_MSIX_STAGING_ROOT" in script
     assert "package.map.txt" in script
     assert "Assert-MsixPayloadPath" in script
+    assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
     assert "/f $MsixMappingPath" in script
     assert "PCW_APPINSTALLER_URI" in script
     assert "PCW_MSIX_PACKAGE_URI" in script
