@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -237,7 +238,14 @@ def test_docling_subprocess_timeout_is_reported(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setenv("PCW_DOCLING_TIMEOUT_SECONDS", "10")
     monkeypatch.setattr("plan_commission_workbench.docling_adapter.subprocess.Popen", lambda *_args, **_kwargs: HangingProcess())
-    monkeypatch.setattr("plan_commission_workbench.docling_adapter.os.killpg", lambda *_args: (_ for _ in ()).throw(OSError("missing group")))
+    if os.name == "nt":
+        monkeypatch.setattr(
+            DoclingTextExtractor,
+            "_kill_windows_process_tree",
+            lambda self, process: self._kill_direct_process(process),
+        )
+    else:
+        monkeypatch.setattr("plan_commission_workbench.docling_adapter.os.killpg", lambda *_args: (_ for _ in ()).throw(OSError("missing group")))
     monkeypatch.setattr(
         DoclingTextExtractor,
         "_start_worker_monitor",
