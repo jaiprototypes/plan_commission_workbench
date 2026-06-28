@@ -225,6 +225,78 @@ function New-MsixMappingFile {
     Set-Content -Path $MappingPath -Value $lines -Encoding UTF8
 }
 
+function Get-PayloadFileCount {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return 0
+    }
+    return @(Get-ChildItem -Path $Path -File -Recurse -Force).Count
+}
+
+function Remove-MsixPayloadPath {
+    param(
+        [string]$RootDirectory,
+        [string]$RelativePath
+    )
+
+    $target = Join-Path $RootDirectory $RelativePath
+    if (-not (Test-Path $target)) {
+        return
+    }
+    $removedFileCount = Get-PayloadFileCount $target
+    Remove-Item -Recurse -Force $target
+    Write-Host "Removed $removedFileCount MSIX staging files from $RelativePath"
+}
+
+function Optimize-MsixPayload {
+    param([string]$SourceDirectory)
+
+    $internalDir = Join-Path $SourceDirectory "_internal"
+    if (-not (Test-Path $internalDir)) {
+        return
+    }
+
+    # Purpose: keep ML development/codegen payload out of MSIX while preserving runtime DLLs.
+    foreach ($relativePath in @(
+        "functorch",
+        "torchgen",
+        "triton",
+        "torch\_dynamo",
+        "torch\_functorch",
+        "torch\_inductor",
+        "torch\ao",
+        "torch\distributed",
+        "torch\include",
+        "torch\onnx",
+        "torch\profiler",
+        "torch\share",
+        "torch\testing",
+        "torch\test",
+        "torch\utils\benchmark",
+        "torch\utils\bottleneck",
+        "torch\utils\tensorboard"
+    )) {
+        Remove-MsixPayloadPath $internalDir $relativePath
+    }
+
+    $fileCount = Get-PayloadFileCount $SourceDirectory
+    Write-Host "MSIX staging payload contains $fileCount files after pruning"
+}
+
+function Test-StagedExecutable {
+    param([string]$SourceDirectory)
+
+    $stagedExe = Join-Path $SourceDirectory "PlanCommissionWorkbench.exe"
+    if (-not (Test-Path $stagedExe)) {
+        throw "Expected staged executable was not created: $stagedExe"
+    }
+    & $stagedExe --self-test-docling
+    if ($LASTEXITCODE -ne 0) {
+        throw "Staged MSIX executable self-test failed with exit code $LASTEXITCODE"
+    }
+}
+
 function Invoke-MsixSigning {
     param(
         [string]$PackagePath,
@@ -303,6 +375,8 @@ function Build-MsixArtifacts {
     New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
     New-MsixLogo (Join-Path $assetDir "Square44x44Logo.png") 44
     New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150
+    Optimize-MsixPayload $MsixStagingDir
+    Test-StagedExecutable $MsixStagingDir
 
     Expand-Template $MsixManifestTemplate (Join-Path $MsixStagingDir "AppxManifest.xml") @{
         PACKAGE_NAME = $resolvedPackageName

@@ -116,6 +116,10 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "package.map.txt" in script
     assert "Assert-MsixPayloadPath" in script
     assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
+    assert "Optimize-MsixPayload $MsixStagingDir" in script
+    assert "Test-StagedExecutable $MsixStagingDir" in script
+    assert '"torch\\_inductor"' in script
+    assert '"torch\\include"' in script
     assert "/f $MsixMappingPath" in script
     assert "PCW_APPINSTALLER_URI" in script
     assert "PCW_MSIX_PACKAGE_URI" in script
