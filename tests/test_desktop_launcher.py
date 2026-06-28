@@ -113,11 +113,18 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "PlanCommissionWorkbench.msix" in script
     assert "PlanCommissionWorkbench.appinstaller" in script
     assert "PCW_MSIX_STAGING_ROOT" in script
+    assert "Assert-LastExitCode" in script
+    assert "Windows executable Docling self-test" in script
+    assert "Get-PythonModuleDirectory \"torch\"" in script
+    assert "$TorchSourceDir\\utils\\_config_module.py;torch\\utils" in script
+    assert "$TorchSourceDir\\_dynamo\\config.py;torch\\_dynamo" in script
     assert "package.map.txt" in script
     assert "Assert-MsixPayloadPath" in script
     assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
     assert "Optimize-MsixPayload $MsixStagingDir" in script
     assert "Test-StagedExecutable $MsixStagingDir" in script
+    assert "Restore-TorchConfigSources" in script
+    assert "Remove-MsixTorchSourcePayload" in script
     assert '"torch\\_inductor"' in script
     assert '"torch\\include"' in script
     assert "/f $MsixMappingPath" in script

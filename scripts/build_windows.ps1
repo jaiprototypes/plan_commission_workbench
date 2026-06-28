@@ -41,6 +41,7 @@ $MsixManifestTemplate = Join-Path $Root "packaging\windows\AppxManifest.xml.in"
 $AppInstallerTemplate = Join-Path $Root "packaging\windows\PlanCommissionWorkbench.appinstaller.in"
 $MsixPath = Join-Path $ArtifactDir "PlanCommissionWorkbench.msix"
 $AppInstallerPath = Join-Path $ArtifactDir "PlanCommissionWorkbench.appinstaller"
+$TorchSourceDir = ""
 
 function New-Venv {
     if (Test-Path $Python) {
@@ -77,6 +78,25 @@ function Get-ProjectVersion {
         throw "Could not read project version from pyproject.toml"
     }
     return $Matches[1]
+}
+
+function Get-PythonModuleDirectory {
+    param([string]$ModuleName)
+
+    $script = "import importlib.util, pathlib; spec = importlib.util.find_spec('$ModuleName'); print(pathlib.Path(spec.origin).parent if spec and spec.origin else '')"
+    $moduleDirectory = (& $Python -c $script).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($moduleDirectory)) {
+        throw "Could not locate Python module directory for $ModuleName"
+    }
+    return $moduleDirectory
+}
+
+function Assert-LastExitCode {
+    param([string]$CommandName)
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "$CommandName failed with exit code $LASTEXITCODE"
+    }
 }
 
 function ConvertTo-MsixVersion {
@@ -279,9 +299,78 @@ function Optimize-MsixPayload {
     )) {
         Remove-MsixPayloadPath $internalDir $relativePath
     }
+    Remove-MsixTorchSourcePayload $internalDir
+    Restore-TorchConfigSources $internalDir
 
     $fileCount = Get-PayloadFileCount $SourceDirectory
     Write-Host "MSIX staging payload contains $fileCount files after pruning"
+}
+
+function Remove-MsixTorchSourcePayload {
+    param([string]$InternalDirectory)
+
+    $torchDir = Join-Path $InternalDirectory "torch"
+    if (-not (Test-Path $torchDir)) {
+        return
+    }
+
+    $sourceExtensions = @(
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cu",
+        ".cuh",
+        ".h",
+        ".hpp",
+        ".jinja",
+        ".md",
+        ".py",
+        ".pyi",
+        ".pyx",
+        ".pxd",
+        ".rst"
+    )
+    $removedCount = 0
+    foreach ($file in Get-ChildItem -Path $torchDir -File -Recurse -Force) {
+        if ($sourceExtensions -notcontains $file.Extension.ToLowerInvariant()) {
+            continue
+        }
+        Remove-Item -Force $file.FullName
+        $removedCount += 1
+    }
+    Write-Host "Removed $removedCount MSIX staging source files from torch"
+}
+
+function Restore-TorchConfigSources {
+    param([string]$InternalDirectory)
+
+    if ([string]::IsNullOrWhiteSpace($TorchSourceDir) -or -not (Test-Path $TorchSourceDir)) {
+        throw "Torch source directory was not resolved before MSIX staging"
+    }
+    foreach ($relativePath in Get-TorchConfigSourcePaths) {
+        $sourcePath = Join-Path $TorchSourceDir $relativePath
+        if (-not (Test-Path $sourcePath)) {
+            continue
+        }
+        $destinationPath = Join-Path (Join-Path $InternalDirectory "torch") $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
+        Copy-Item -Force $sourcePath $destinationPath
+    }
+}
+
+function Get-TorchConfigSourcePaths {
+    return @(
+        "utils\_config_module.py",
+        "_dynamo\config.py",
+        "_export\config.py",
+        "_functorch\config.py",
+        "_inductor\config.py",
+        "_inductor\config_comms.py",
+        "compiler\config.py",
+        "distributed\config.py",
+        "fx\experimental\_config.py",
+        "utils\serialization\config.py"
+    )
 }
 
 function Test-StagedExecutable {
@@ -292,9 +381,7 @@ function Test-StagedExecutable {
         throw "Expected staged executable was not created: $stagedExe"
     }
     & $stagedExe --self-test-docling
-    if ($LASTEXITCODE -ne 0) {
-        throw "Staged MSIX executable self-test failed with exit code $LASTEXITCODE"
-    }
+    Assert-LastExitCode "Staged MSIX executable self-test"
 }
 
 function Invoke-MsixSigning {
@@ -415,12 +502,18 @@ Set-Location $Root
 New-Venv
 
 & $Python -m pip install --upgrade pip setuptools wheel
+Assert-LastExitCode "pip bootstrap install"
 & $Python -m pip install -r requirements.txt
+Assert-LastExitCode "requirements install"
 & $Python -m pip install -e ".[test]"
+Assert-LastExitCode "editable test install"
 & $Python -m pip install "pyinstaller>=6.0"
+Assert-LastExitCode "PyInstaller install"
+$TorchSourceDir = Get-PythonModuleDirectory "torch"
 
 if (-not $SkipTests) {
     & $Python -m pytest
+    Assert-LastExitCode "pytest"
 }
 
 Remove-Item -Recurse -Force (Join-Path $Root "build") -ErrorAction SilentlyContinue
@@ -436,6 +529,16 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --name "PlanCommissionWorkbench" `
     --add-data "plan_commission_workbench\templates;plan_commission_workbench\templates" `
     --add-data "plan_commission_workbench\static;plan_commission_workbench\static" `
+    --add-data "$TorchSourceDir\utils\_config_module.py;torch\utils" `
+    --add-data "$TorchSourceDir\_dynamo\config.py;torch\_dynamo" `
+    --add-data "$TorchSourceDir\_export\config.py;torch\_export" `
+    --add-data "$TorchSourceDir\_functorch\config.py;torch\_functorch" `
+    --add-data "$TorchSourceDir\_inductor\config.py;torch\_inductor" `
+    --add-data "$TorchSourceDir\_inductor\config_comms.py;torch\_inductor" `
+    --add-data "$TorchSourceDir\compiler\config.py;torch\compiler" `
+    --add-data "$TorchSourceDir\distributed\config.py;torch\distributed" `
+    --add-data "$TorchSourceDir\fx\experimental\_config.py;torch\fx\experimental" `
+    --add-data "$TorchSourceDir\utils\serialization\config.py;torch\utils\serialization" `
     --collect-all "docling" `
     --collect-all "docling_core" `
     --collect-all "docling_parse" `
@@ -452,12 +555,14 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --hidden-import "uvicorn.protocols.websockets.auto" `
     --hidden-import "uvicorn.lifespan.on" `
     "plan_commission_workbench\desktop_launcher.py"
+Assert-LastExitCode "PyInstaller"
 
 if (-not (Test-Path $ExePath)) {
     throw "Expected executable was not created: $ExePath"
 }
 
 & $ExePath --self-test-docling
+Assert-LastExitCode "Windows executable Docling self-test"
 
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $AppDir "README.md")
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
