@@ -23,7 +23,20 @@ $ArtifactDir = Join-Path $Root "artifacts"
 $AppDir = Join-Path $Root "dist\PlanCommissionWorkbench"
 $ExePath = Join-Path $AppDir "PlanCommissionWorkbench.exe"
 $ZipPath = Join-Path $ArtifactDir "PlanCommissionWorkbench-windows.zip"
-$MsixStagingDir = Join-Path $Root "build\msix\PlanCommissionWorkbench"
+$MsixBuildRoot = if (-not [string]::IsNullOrWhiteSpace($env:PCW_MSIX_STAGING_ROOT)) {
+    $env:PCW_MSIX_STAGING_ROOT
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+    Join-Path $env:RUNNER_TEMP "pcw-msix"
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+    Join-Path $env:TEMP "pcw-msix"
+}
+else {
+    Join-Path $Root "build\msix"
+}
+$MsixStagingDir = Join-Path $MsixBuildRoot "PlanCommissionWorkbench"
+$MsixMappingPath = Join-Path $MsixBuildRoot "package.map.txt"
 $MsixManifestTemplate = Join-Path $Root "packaging\windows\AppxManifest.xml.in"
 $AppInstallerTemplate = Join-Path $Root "packaging\windows\PlanCommissionWorkbench.appinstaller.in"
 $MsixPath = Join-Path $ArtifactDir "PlanCommissionWorkbench.msix"
@@ -173,6 +186,44 @@ function New-MsixLogo {
     }
 }
 
+function Assert-MsixPayloadPath {
+    param([string]$RelativePath)
+
+    # Purpose: fail before MakeAppx when a frozen dependency creates an invalid MSIX payload path.
+    if ($RelativePath -match '[<>:"|?*]') {
+        throw "MSIX payload path contains an invalid character: $RelativePath"
+    }
+    foreach ($segment in $RelativePath.Split("\")) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            throw "MSIX payload path contains an empty segment: $RelativePath"
+        }
+        if ($segment.EndsWith(".") -or $segment.EndsWith(" ")) {
+            throw "MSIX payload path segment ends with a dot or space: $RelativePath"
+        }
+    }
+    if ($RelativePath.Length -gt 240) {
+        throw "MSIX payload path is too long for reliable MakeAppx packaging: $RelativePath"
+    }
+}
+
+function New-MsixMappingFile {
+    param(
+        [string]$SourceDirectory,
+        [string]$MappingPath
+    )
+
+    $sourceRoot = [System.IO.Path]::GetFullPath($SourceDirectory).TrimEnd("\")
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("[Files]")
+    foreach ($file in Get-ChildItem -Path $sourceRoot -File -Recurse | Sort-Object FullName) {
+        $sourcePath = [System.IO.Path]::GetFullPath($file.FullName)
+        $relativePath = $sourcePath.Substring($sourceRoot.Length + 1)
+        Assert-MsixPayloadPath $relativePath
+        $lines.Add('"{0}" "{1}"' -f $sourcePath, $relativePath)
+    }
+    Set-Content -Path $MappingPath -Value $lines -Encoding UTF8
+}
+
 function Invoke-MsixSigning {
     param(
         [string]$PackagePath,
@@ -244,6 +295,7 @@ function Build-MsixArtifacts {
     $resolvedPackageUri = ConvertTo-AbsoluteUri (Use-DefaultString $PackageUri "PCW_MSIX_PACKAGE_URI" "") $MsixPath
 
     Remove-Item -Recurse -Force $MsixStagingDir -ErrorAction SilentlyContinue
+    Remove-Item -Force $MsixMappingPath -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $MsixStagingDir | Out-Null
     Copy-Item -Path (Join-Path $AppDir "*") -Destination $MsixStagingDir -Recurse -Force
     $assetDir = Join-Path $MsixStagingDir "Assets"
@@ -274,7 +326,8 @@ function Build-MsixArtifacts {
     }
 
     Remove-Item -Force $MsixPath -ErrorAction SilentlyContinue
-    & $makeAppx pack /d $MsixStagingDir /p $MsixPath /o
+    New-MsixMappingFile $MsixStagingDir $MsixMappingPath
+    & $makeAppx pack /f $MsixMappingPath /p $MsixPath /o
     if ($LASTEXITCODE -ne 0) {
         throw "MakeAppx failed with exit code $LASTEXITCODE"
     }

@@ -112,6 +112,10 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert '$token = "{{{0}}}"' not in script
     assert "PlanCommissionWorkbench.msix" in script
     assert "PlanCommissionWorkbench.appinstaller" in script
+    assert "PCW_MSIX_STAGING_ROOT" in script
+    assert "package.map.txt" in script
+    assert "Assert-MsixPayloadPath" in script
+    assert "/f $MsixMappingPath" in script
     assert "PCW_APPINSTALLER_URI" in script
     assert "PCW_MSIX_PACKAGE_URI" in script
     assert "CreateTestCertificate" in script
