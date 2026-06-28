@@ -181,25 +181,61 @@ function Find-WindowsSdkTool {
     return $null
 }
 
+function Get-StableLogoHash {
+    param([string]$Value)
+
+    # Purpose: produce repeatable logo variation from the package version.
+    $hash = 17
+    foreach ($character in ([string]$Value).ToCharArray()) {
+        $hash = (($hash * 31) + [int][char]$character) % 100000
+    }
+    return $hash
+}
+
 function New-MsixLogo {
     param(
         [string]$Path,
-        [int]$Size
+        [int]$Size,
+        [string]$VariationKey
     )
 
     Add-Type -AssemblyName System.Drawing
+    $hash = Get-StableLogoHash $VariationKey
+    $red = 238 + ($hash % 15)
+    $green = 190 + [int]([Math]::Floor($hash / 7) % 31)
+    $blue = 20 + [int]([Math]::Floor($hash / 13) % 30)
     $bitmap = New-Object System.Drawing.Bitmap($Size, $Size)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $background = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(31, 41, 55))
-    $accent = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(14, 165, 233))
+    $shadow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(70, 0, 0, 0))
+    $accent = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($red, $green, $blue))
     try {
         $graphics.FillRectangle($background, 0, 0, $Size, $Size)
-        $barHeight = [Math]::Max(4, [int]($Size * 0.18))
-        $graphics.FillRectangle($accent, 0, $Size - $barHeight, $Size, $barHeight)
+        $center = [double]$Size / 2
+        $outerRadius = [double]$Size * 0.36
+        $innerRadius = $outerRadius * (0.42 + (($hash % 9) * 0.01))
+        $rotationRadians = (($hash % 13) - 6) * [Math]::PI / 180
+        $points = @()
+        for ($index = 0; $index -lt 10; $index++) {
+            $radius = if ($index % 2 -eq 0) { $outerRadius } else { $innerRadius }
+            $angle = -[Math]::PI / 2 + $rotationRadians + $index * [Math]::PI / 5
+            $points += [System.Drawing.PointF]::new(
+                [single]($center + [Math]::Cos($angle) * $radius),
+                [single]($center + [Math]::Sin($angle) * $radius)
+            )
+        }
+        $shadowOffset = [Math]::Max(1, [int]($Size * 0.035))
+        $shadowPoints = foreach ($point in $points) {
+            [System.Drawing.PointF]::new($point.X + $shadowOffset, $point.Y + $shadowOffset)
+        }
+        $graphics.FillPolygon($shadow, [System.Drawing.PointF[]]$shadowPoints)
+        $graphics.FillPolygon($accent, [System.Drawing.PointF[]]$points)
         $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     }
     finally {
         $accent.Dispose()
+        $shadow.Dispose()
         $background.Dispose()
         $graphics.Dispose()
         $bitmap.Dispose()
@@ -500,8 +536,8 @@ function Build-MsixArtifacts {
     Copy-Item -Path (Join-Path $AppDir "*") -Destination $MsixStagingDir -Recurse -Force
     $assetDir = Join-Path $MsixStagingDir "Assets"
     New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
-    New-MsixLogo (Join-Path $assetDir "Square44x44Logo.png") 44
-    New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150
+    New-MsixLogo (Join-Path $assetDir "Square44x44Logo.png") 44 $resolvedVersion
+    New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150 $resolvedVersion
     Optimize-MsixPayload $MsixStagingDir
     Test-StagedExecutable $MsixStagingDir
 

@@ -220,19 +220,20 @@ References:
 ## Diagnostic Return Channel
 
 Production support should not depend on the operator manually finding and
-emailing state bundles by hand. The app should use a configured email service to
-send compact diagnostic reports back to GECG, with a controlled path for full
-state bundles when needed.
+emailing state bundles by hand. The signed Windows build should include a
+developer-owned Gmail SMTP diagnostic sender so compact reports can return to
+GECG without any customer email setup.
 
-This keeps the production footprint smaller than a hosted listener service. The
-preferred Gmail and Microsoft paths should use browser OAuth so the operator does
-not have to manage mailbox passwords. SMTP remains the fallback for iCloud,
-Yahoo, Zoho, and custom providers. Any SMTP password or OAuth refresh token must
-live in Windows Credential Manager and never be embedded in the executable.
+This keeps the production footprint smaller than a hosted listener service and
+removes operator-facing email configuration. The Gmail app password is injected
+only by GitHub Actions from `PCW_DIAGNOSTIC_SMTP_PASSWORD`; it must never be
+committed to source, written to local settings, logged, or shown in the UI.
+Because a packaged desktop app can be inspected, this mailbox must be treated as
+a dedicated low-privilege support sender and rotated if exposed.
 
 Preferred communication path:
 
-`Desktop app -> connected Gmail/Microsoft account or SMTP service -> GECG diagnostics inbox`
+`Desktop app -> baked Gmail SMTP support sender -> GECG diagnostics inbox`
 
 Future optional path:
 
@@ -265,36 +266,34 @@ Install identity:
 
 Email configuration:
 
-- Support recipient email.
-- Delivery method: Gmail OAuth, Microsoft OAuth, or SMTP fallback.
-- Gmail/Microsoft public OAuth client IDs must be developer-owned configuration
-  baked into the signed Windows build from GitHub repository variables. They
-  should not be entered or managed by the operator in the app UI.
-- SMTP host and port.
-- TLS mode.
-- SMTP username.
-- SMTP app password or service credential.
-- Optional reply-to address.
-- Automatic failure email enabled/disabled.
+- Support recipient email is a GitHub repository variable.
+- SMTP host, port, username, sender, TLS mode, and automatic failure email
+  behavior are GitHub repository variables.
+- SMTP app password is a GitHub repository secret.
+- The release workflow rewrites `plan_commission_workbench/diagnostic_email_defaults.py`
+  inside the build runner before packaging.
+- The checked-in defaults module must remain blank or non-secret.
+- The operator UI must not expose delivery method, recipient, SMTP host,
+  username, password, sender, OAuth, provider choices, or automatic-failure
+  toggles.
 - Full state bundle attachment enabled only by explicit operator confirmation.
 - Clear stored OpenAI API key.
-- Clear stored email-service credential.
+- Clear stored legacy email-service credential only through support/API paths;
+  the baked build credential cannot be cleared from the customer machine.
 - Clear all stored workbench secrets.
 
-The SMTP password or OAuth refresh token must be saved in Windows Credential
-Manager. It must not be stored in SQLite, logs, state bundles, source control, or
-the packaged executable. OAuth client IDs are public identifiers, not secrets,
-but they are still developer configuration. Changing them changes which provider
-app owns future Gmail/Microsoft consent, so the customer-facing app should treat
-missing values as a broken build configuration rather than asking the operator to
-paste IDs.
+The SMTP password must not be stored in SQLite, logs, state bundles, source
+control, local settings JSON, or Windows Credential Manager. It is present only
+in the packaged build artifact that GitHub Actions signs and publishes. Missing
+diagnostic email values should be treated as broken release configuration, not a
+customer setup task.
 
 Credential clearing:
 
 - Add a settings action to clear the OpenAI API key from Windows Credential
   Manager.
-- Add a settings action to clear the SMTP/email-service credential from Windows
-  Credential Manager.
+- Keep a support/API path that can clear legacy SMTP/email-service credentials
+  from Windows Credential Manager after users upgrade from older builds.
 - Add a combined `Clear All Stored Secrets` action for production support
   handoff or credential rotation.
 - Confirm before clearing secrets because future runs or diagnostic emails may
@@ -306,27 +305,26 @@ Security and privacy:
 
 - Redact environment variables and secrets.
 - Never include the OpenAI API key.
-- Never include the SMTP password or email-service token.
+- Never include the SMTP password.
 - Prefer compact JSON or text reports for automatic sending.
 - Require operator approval before attaching the full SQLite database.
 - Rate-limit automatic failure reporting to avoid repeated reports for the same
   failing source identity.
-- Store email-service credentials in Windows Credential Manager.
-- Make stored secrets removable from the UI without requiring the operator to
+- Do not store diagnostic email credentials in Windows Credential Manager for
+  new builds.
+- Make legacy stored secrets removable without requiring the operator to
   manually open Windows Credential Manager.
 
 Direct email responsibilities:
 
-1. Validate SMTP configuration before enabling automatic failure reports.
-2. Connect Gmail/Microsoft through the browser OAuth flow when selected. The
-   operator should only see the provider sign-in and consent screen, not OAuth
-   client IDs or secrets.
-3. Send a small test email from the settings screen.
-4. Generate deterministic subject lines for grouping failures.
-5. Attach compact JSON/text diagnostics automatically.
-6. Attach full state bundles only with operator approval.
-7. Record send success/failure in local logs without logging credentials.
-8. Track duplicate failures by source identity, run status, and error hash.
+1. Validate baked SMTP configuration during tests and release verification.
+2. Keep the operator UI limited to `Send Diagnostics`.
+3. Generate deterministic subject lines for grouping failures.
+4. Attach compact JSON/text diagnostics automatically when enabled by build
+   configuration.
+5. Attach full state bundles only with operator approval.
+6. Record send success/failure in local logs without logging credentials.
+7. Track duplicate failures by source identity, run status, and error hash.
 
 Diagnostic report contents:
 
@@ -423,9 +421,9 @@ Diagnostics and support communication:
 - Email providers may block large attachments or mark automated diagnostics as
   suspicious. The app should detect send failure and preserve the local bundle
   path for manual retrieval.
-- SMTP app passwords and service tokens can expire or be revoked. The settings
-  UI should show a clear test/send failure and let the operator replace the
-  stored credential.
+- SMTP app passwords and service tokens can expire or be revoked. Send failures
+  should be logged clearly, and credential rotation should happen through
+  GitHub Secrets plus a new signed App Installer release.
 - Email is notification and transport, not a durable support database. If
   support volume grows, move to the optional HTTPS endpoint/storage path.
 - Full state bundle attachments may exceed provider limits. The compact report

@@ -138,6 +138,11 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "'[<>:\"|?*\\[\\]]'" in script
     assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
     assert "Optimize-MsixPayload $MsixStagingDir" in script
+    assert "$graphics.FillPolygon($accent" in script
+    assert "Get-StableLogoHash" in script
+    assert "$rotationRadians" in script
+    assert 'New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150 $resolvedVersion' in script
+    assert "$index -lt 10" in script
     assert "Test-StagedExecutable $MsixStagingDir" in script
     assert "Restore-TorchConfigSources" in script
     assert "Remove-MsixTorchSourcePayload" in script
@@ -162,6 +167,9 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "PCW_REQUIRE_TRUSTED_SIGNATURE" in workflow
     assert "Configure App Installer feed" in workflow
     assert "function ConvertTo-MsixVersion" in workflow
+    assert "Bake diagnostic email defaults" in workflow
+    assert "PCW_DIAGNOSTIC_SMTP_PASSWORD" in workflow
+    assert "Validate diagnostic email release configuration" in workflow
     assert "pcw-windows-stable" in workflow
     assert "PCW_VERSION_RELEASE_TAG=pcw-windows-v$env:PCW_MSIX_VERSION" in workflow
     assert "Publish App Installer update feed" in workflow

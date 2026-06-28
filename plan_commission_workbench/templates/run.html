@@ -24,74 +24,11 @@
 
 <section class="panel">
   <div class="panel-head">
-    <h2>Diagnostics & Secrets</h2>
-    <span id="diagnostic-email-status" class="muted"></span>
+    <h2>Diagnostics</h2>
   </div>
-  <form id="diagnostic-email-form" class="settings-form">
-    <label>
-      Send method
-      <select name="delivery_method">
-        <option value="gmail_oauth">Sign in with Gmail</option>
-        <option value="microsoft_oauth">Sign in with Microsoft</option>
-        <option value="smtp">Advanced SMTP</option>
-      </select>
-    </label>
-    <label>
-      Recipient
-      <input name="recipient" type="email" placeholder="support@example.com">
-    </label>
-    <label class="smtp-field">
-      SMTP preset
-      <select name="smtp_preset">
-        <option value="">Custom</option>
-        <option value="yahoo">Yahoo Mail</option>
-        <option value="icloud">iCloud Mail</option>
-        <option value="zoho">Zoho Mail</option>
-      </select>
-    </label>
-    <label class="smtp-field">
-      SMTP host
-      <input name="smtp_host" type="text" placeholder="smtp.example.com">
-    </label>
-    <label class="smtp-field">
-      Port
-      <input name="smtp_port" type="number" min="1" max="65535" value="587">
-    </label>
-    <label class="smtp-field">
-      Username
-      <input name="smtp_username" type="text" autocomplete="username">
-    </label>
-    <label class="smtp-field">
-      Password
-      <input name="smtp_password" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved">
-    </label>
-    <label>
-      Sender
-      <input name="sender" type="email" placeholder="Optional">
-    </label>
-    <label class="inline-toggle">
-      <input name="enabled" type="checkbox">
-      Auto email failures
-    </label>
-    <label class="inline-toggle smtp-field">
-      <input name="use_starttls" type="checkbox" checked>
-      STARTTLS
-    </label>
-    <label class="inline-toggle smtp-field">
-      <input name="use_ssl" type="checkbox">
-      SSL
-    </label>
-    <div class="panel-actions wide-actions">
-      <button type="submit">Save Email</button>
-      <button id="connect-gmail-oauth" class="secondary hidden" type="button">Connect Gmail</button>
-      <button id="connect-microsoft-oauth" class="secondary hidden" type="button">Connect Microsoft</button>
-      <button id="test-diagnostic-email" class="secondary" type="button">Test Email</button>
-      <button id="send-diagnostic-email" class="secondary" type="button">Send Diagnostics</button>
-      <button id="clear-openai-key" class="danger" type="button">Clear OpenAI Key</button>
-      <button id="clear-email-secret" class="danger" type="button">Clear Email Secret</button>
-      <button id="clear-all-secrets" class="danger" type="button">Clear All Secrets</button>
-    </div>
-  </form>
+  <div class="panel-actions wide-actions">
+    <button id="send-diagnostic-email" class="secondary" type="button">Send Diagnostics</button>
+  </div>
 </section>
 
 <section class="grid two">

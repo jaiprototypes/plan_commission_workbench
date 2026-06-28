@@ -136,6 +136,10 @@ on release tag `pcw-windows-stable` by default:
 - `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.appinstaller`
 - `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.msix`
 
+The Windows package icon is a star generated during the MSIX build. Its color,
+tilt, and proportions vary slightly from the MSIX package version so a user can
+visually confirm that an update has reached the machine.
+
 Install production machines from the stable `.appinstaller` URL, not from a
 per-run GitHub Actions artifact. Actions artifacts are useful verification
 outputs, but Windows cannot poll them as an update feed. A direct `.msix`

@@ -23,8 +23,15 @@ jobs:
       PCW_MSIX_PUBLISHER: ${{ vars.PCW_MSIX_PUBLISHER }}
       PCW_REQUIRE_TRUSTED_SIGNATURE: ${{ vars.PCW_REQUIRE_TRUSTED_SIGNATURE }}
       PCW_UPDATE_RELEASE_TAG: ${{ vars.PCW_UPDATE_RELEASE_TAG }}
-      PCW_GOOGLE_OAUTH_CLIENT_ID: ${{ vars.PCW_GOOGLE_OAUTH_CLIENT_ID }}
-      PCW_MICROSOFT_OAUTH_CLIENT_ID: ${{ vars.PCW_MICROSOFT_OAUTH_CLIENT_ID }}
+      PCW_DIAGNOSTIC_EMAIL_RECIPIENT: ${{ vars.PCW_DIAGNOSTIC_EMAIL_RECIPIENT }}
+      PCW_DIAGNOSTIC_SMTP_HOST: ${{ vars.PCW_DIAGNOSTIC_SMTP_HOST }}
+      PCW_DIAGNOSTIC_SMTP_PORT: ${{ vars.PCW_DIAGNOSTIC_SMTP_PORT }}
+      PCW_DIAGNOSTIC_SMTP_USERNAME: ${{ vars.PCW_DIAGNOSTIC_SMTP_USERNAME }}
+      PCW_DIAGNOSTIC_SMTP_SENDER: ${{ vars.PCW_DIAGNOSTIC_SMTP_SENDER }}
+      PCW_DIAGNOSTIC_SMTP_USE_SSL: ${{ vars.PCW_DIAGNOSTIC_SMTP_USE_SSL }}
+      PCW_DIAGNOSTIC_SMTP_USE_STARTTLS: ${{ vars.PCW_DIAGNOSTIC_SMTP_USE_STARTTLS }}
+      PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES: ${{ vars.PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES }}
+      PCW_DIAGNOSTIC_SMTP_PASSWORD: ${{ secrets.PCW_DIAGNOSTIC_SMTP_PASSWORD }}
       PCW_SIGNING_CERTIFICATE_BASE64: ${{ secrets.PCW_SIGNING_CERTIFICATE_BASE64 }}
       PCW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.PCW_SIGNING_CERTIFICATE_PASSWORD }}
 
@@ -106,18 +113,64 @@ jobs:
           [IO.File]::WriteAllBytes("artifacts\PlanCommissionWorkbench-signing.cer", $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           "PCW_SIGNING_CERTIFICATE_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Bake diagnostic OAuth client IDs
+      - name: Bake diagnostic email defaults
         shell: pwsh
         run: |
-          $googleClientId = ([string]$env:PCW_GOOGLE_OAUTH_CLIENT_ID).Replace("'", "''")
-          $microsoftClientId = ([string]$env:PCW_MICROSOFT_OAUTH_CLIENT_ID).Replace("'", "''")
+          function Escape-PythonString {
+            param([string]$Value)
+            if ($null -eq $Value) { return "" }
+            return $Value.Replace("\", "\\").Replace("'", "\'")
+          }
+          function Bool-Literal {
+            param([string]$Value, [bool]$Default)
+            $cleaned = ([string]$Value).Trim().ToLowerInvariant()
+            if (@("1", "true", "yes", "on") -contains $cleaned) { return "True" }
+            if (@("0", "false", "no", "off") -contains $cleaned) { return "False" }
+            if ($Default) { return "True" }
+            return "False"
+          }
+
+          $hostValue = if ([string]::IsNullOrWhiteSpace($env:PCW_DIAGNOSTIC_SMTP_HOST)) { "smtp.gmail.com" } else { $env:PCW_DIAGNOSTIC_SMTP_HOST }
+          $portValue = if ([string]::IsNullOrWhiteSpace($env:PCW_DIAGNOSTIC_SMTP_PORT)) { "587" } else { $env:PCW_DIAGNOSTIC_SMTP_PORT }
+          if ($portValue -notmatch '^\d+$') {
+            throw "PCW_DIAGNOSTIC_SMTP_PORT must be numeric"
+          }
+          if ([int]$portValue -lt 1 -or [int]$portValue -gt 65535) {
+            throw "PCW_DIAGNOSTIC_SMTP_PORT must be between 1 and 65535"
+          }
+
           $lines = @(
-            '"""Build-time public OAuth client defaults for diagnostic email providers."""',
+            '"""Build-time developer diagnostic email defaults."""',
             '',
-            "GOOGLE_CLIENT_ID = '$googleClientId'",
-            "MICROSOFT_CLIENT_ID = '$microsoftClientId'"
+            "RECIPIENT = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_EMAIL_RECIPIENT)'",
+            "SMTP_HOST = '$(Escape-PythonString $hostValue)'",
+            "SMTP_PORT = $portValue",
+            "SMTP_USERNAME = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_USERNAME)'",
+            "SMTP_PASSWORD = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_PASSWORD)'",
+            "SENDER = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_SENDER)'",
+            "USE_SSL = $(Bool-Literal $env:PCW_DIAGNOSTIC_SMTP_USE_SSL $false)",
+            "USE_STARTTLS = $(Bool-Literal $env:PCW_DIAGNOSTIC_SMTP_USE_STARTTLS $true)",
+            "AUTO_EMAIL_FAILURES = $(Bool-Literal $env:PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES $false)"
           )
-          $lines | Set-Content -Path "plan_commission_workbench\oauth_defaults.py" -Encoding UTF8
+          $lines | Set-Content -Path "plan_commission_workbench\diagnostic_email_defaults.py" -Encoding UTF8
+
+      - name: Validate diagnostic email release configuration
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: pwsh
+        run: |
+          $missing = @()
+          foreach ($name in @(
+            "PCW_DIAGNOSTIC_EMAIL_RECIPIENT",
+            "PCW_DIAGNOSTIC_SMTP_USERNAME",
+            "PCW_DIAGNOSTIC_SMTP_PASSWORD"
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Missing diagnostic email release configuration: $($missing -join ', ')"
+          }
 
       - name: Build launcher
         shell: pwsh

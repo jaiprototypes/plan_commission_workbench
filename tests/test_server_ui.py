@@ -50,38 +50,33 @@ def test_run_js_can_download_state_bundle() -> None:
     assert "download_url" in script
 
 
-def test_run_ui_exposes_diagnostic_email_and_secret_controls() -> None:
+def test_run_ui_exposes_only_diagnostic_send_action() -> None:
     template = (PACKAGE_ROOT / "templates" / "run.html").read_text(encoding="utf-8")
     script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
-    assert "diagnostic-email-form" in template
-    assert 'name="delivery_method"' in template
-    assert "Sign in with Gmail" in template
-    assert "Sign in with Microsoft" in template
-    assert "Advanced SMTP" in template
-    assert "Connect Gmail" in template
-    assert "Connect Microsoft" in template
-    assert 'name="smtp_preset"' in template
-    assert "Yahoo Mail" in template
-    assert "iCloud Mail" in template
-    assert "Zoho Mail" in template
+    assert "send-diagnostic-email" in template
+    assert "Send Diagnostics" in template
+    assert "diagnostic-email-form" not in template
+    assert 'name="delivery_method"' not in template
+    assert "Sign in with Gmail" not in template
+    assert "Sign in with Microsoft" not in template
+    assert "Advanced SMTP" not in template
+    assert "Connect Gmail" not in template
+    assert "Connect Microsoft" not in template
+    assert 'name="smtp_preset"' not in template
+    assert 'name="smtp_password"' not in template
     assert "Google OAuth Client ID" not in template
     assert "Microsoft OAuth Client ID" not in template
-    assert "clear-openai-key" in template
-    assert "clear-email-secret" in template
-    assert "clear-all-secrets" in template
-    assert "smtpPresets" in script
+    assert "smtpPresets" not in script
     assert "smtp.gmail.com" not in script
     assert "smtp.office365.com" not in script
-    assert "smtp.mail.yahoo.com" in script
-    assert "smtp.mail.me.com" in script
-    assert "smtp.zoho.com" in script
-    assert "applyDiagnosticEmailPreset" in script
-    assert "connectDiagnosticEmailProvider" in script
-    assert "/settings/diagnostic-email/oauth/${provider}/start" in script
-    assert "/settings/diagnostic-email" in script
+    assert "smtp.mail.yahoo.com" not in script
+    assert "smtp.mail.me.com" not in script
+    assert "smtp.zoho.com" not in script
+    assert "applyDiagnosticEmailPreset" not in script
+    assert "connectDiagnosticEmailProvider" not in script
+    assert "/settings/diagnostic-email/oauth" not in script
     assert "/diagnostics/email" in script
-    assert "/settings/secrets" in script
 
 
 def test_agenda_js_exposes_review_actions() -> None:
@@ -283,14 +278,6 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
         def send_test_email(self):
             return {"sent": True}
 
-        def begin_oauth(self, provider, redirect_uri):
-            self.oauth_start = (provider, redirect_uri)
-            return {"authorization_url": "https://example.test/oauth"}
-
-        def finish_oauth(self, provider, *, state, code=None, error=None):
-            self.oauth_finish = (provider, state, code, error)
-            return {"provider": provider, "email": "mailer@example.com"}
-
         def send_run_report(self, run_id, *, include_state_bundle=False, state_bundle_path=None):
             self.sent_report = (run_id, include_state_bundle, state_bundle_path)
             return {"sent": True, "attached_state_bundle": bool(state_bundle_path)}
@@ -318,13 +305,10 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
     cleared_all = client.delete("/settings/secrets")
 
     assert settings.status_code == 200
-    assert fake.configured_payload["recipient"] == "support@example.com"
+    assert fake.configured_payload == {"enabled": False}
     assert test_email.json()["sent"] is True
-    assert oauth_start.json()["authorization_url"] == "https://example.test/oauth"
-    assert fake.oauth_start[0] == "gmail"
-    assert "/settings/diagnostic-email/oauth/gmail/callback" in fake.oauth_start[1]
-    assert oauth_callback.status_code == 200
-    assert fake.oauth_finish == ("gmail", "oauth-state", "oauth-code", None)
+    assert oauth_start.status_code == 404
+    assert oauth_callback.status_code == 404
     assert manual.json()["sent"] is True
     assert cleared.json()["credential_deleted"] is True
     assert cleared_all.json()["diagnostic_email"]["credential_deleted"] is True
