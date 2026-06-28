@@ -210,7 +210,7 @@ function Assert-MsixPayloadPath {
     param([string]$RelativePath)
 
     # Purpose: fail before MakeAppx when a frozen dependency creates an invalid MSIX payload path.
-    if ($RelativePath -match '[<>:"|?*]') {
+    if ($RelativePath -match '[<>:"|?*\[\]]') {
         throw "MSIX payload path contains an invalid character: $RelativePath"
     }
     foreach ($segment in $RelativePath.Split("\")) {
@@ -279,6 +279,7 @@ function Optimize-MsixPayload {
 
     # Purpose: keep ML development/codegen payload out of MSIX while preserving runtime DLLs.
     foreach ($relativePath in @(
+        "docx\templates\default-docx-template",
         "functorch",
         "torchgen",
         "triton",
@@ -301,7 +302,7 @@ function Optimize-MsixPayload {
     }
     Remove-MsixTorchSourcePayload $internalDir
     Restore-TorchConfigSources $internalDir
-    Remove-MsixPurePythonSourcePayload $internalDir @("openai", "transformers")
+    Remove-MsixPurePythonSourcePayload $internalDir @("openai")
 
     $fileCount = Get-PayloadFileCount $SourceDirectory
     Write-Host "MSIX staging payload contains $fileCount files after pruning"
@@ -398,6 +399,20 @@ function Remove-MsixPurePythonSourcePayload {
     }
 }
 
+function Invoke-ExecutableSelfTest {
+    param(
+        [string]$ExecutablePath,
+        [string]$Argument,
+        [string]$Name
+    )
+
+    # Purpose: wait on the windowed PyInstaller executable and read its real exit code.
+    $process = Start-Process -FilePath $ExecutablePath -ArgumentList $Argument -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "$Name failed with exit code $($process.ExitCode)"
+    }
+}
+
 function Test-StagedExecutable {
     param([string]$SourceDirectory)
 
@@ -405,10 +420,8 @@ function Test-StagedExecutable {
     if (-not (Test-Path $stagedExe)) {
         throw "Expected staged executable was not created: $stagedExe"
     }
-    & $stagedExe --self-test-docling
-    Assert-LastExitCode "Staged MSIX executable self-test"
-    & $stagedExe --self-test-runtime-imports
-    Assert-LastExitCode "Staged MSIX runtime import self-test"
+    Invoke-ExecutableSelfTest $stagedExe "--self-test-docling" "Staged MSIX executable self-test"
+    Invoke-ExecutableSelfTest $stagedExe "--self-test-runtime-imports" "Staged MSIX runtime import self-test"
 }
 
 function Invoke-MsixSigning {
@@ -588,10 +601,8 @@ if (-not (Test-Path $ExePath)) {
     throw "Expected executable was not created: $ExePath"
 }
 
-& $ExePath --self-test-docling
-Assert-LastExitCode "Windows executable Docling self-test"
-& $ExePath --self-test-runtime-imports
-Assert-LastExitCode "Windows executable runtime import self-test"
+Invoke-ExecutableSelfTest $ExePath "--self-test-docling" "Windows executable Docling self-test"
+Invoke-ExecutableSelfTest $ExePath "--self-test-runtime-imports" "Windows executable runtime import self-test"
 
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $AppDir "README.md")
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue

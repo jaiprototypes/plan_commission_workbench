@@ -118,9 +118,17 @@ def run_docling_self_test() -> int:
 def run_runtime_import_self_test() -> int:
     """Purpose: verify lazy production dependencies survive staged MSIX pruning."""
 
+    from docx import Document
     import openai  # noqa: F401
     import transformers  # noqa: F401
 
+    with tempfile.TemporaryDirectory() as tmp:
+        output_path = Path(tmp) / "docx_smoke_test.docx"
+        document = Document()
+        document.add_paragraph("Plan Commission Workbench DOCX Smoke Test")
+        document.save(output_path)
+        if output_path.stat().st_size <= 0:
+            raise RuntimeError("DOCX smoke test did not create a document")
     return 0
 
 

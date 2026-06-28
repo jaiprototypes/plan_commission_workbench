@@ -127,13 +127,17 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "$TorchSourceDir\\_dynamo\\config.py;torch\\_dynamo" in script
     assert "package.map.txt" in script
     assert "Assert-MsixPayloadPath" in script
+    assert "'[<>:\"|?*\\[\\]]'" in script
     assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
     assert "Optimize-MsixPayload $MsixStagingDir" in script
     assert "Test-StagedExecutable $MsixStagingDir" in script
     assert "Restore-TorchConfigSources" in script
     assert "Remove-MsixTorchSourcePayload" in script
     assert "Remove-MsixPurePythonSourcePayload" in script
-    assert 'Remove-MsixPurePythonSourcePayload $internalDir @("openai", "transformers")' in script
+    assert 'Remove-MsixPurePythonSourcePayload $internalDir @("openai")' in script
+    assert '"docx\\templates\\default-docx-template"' in script
+    assert "Invoke-ExecutableSelfTest" in script
+    assert "Start-Process -FilePath $ExecutablePath -ArgumentList $Argument -Wait -PassThru" in script
     assert "Staged MSIX runtime import self-test" in script
     assert '"torch\\_inductor"' in script
     assert '"torch\\include"' in script
