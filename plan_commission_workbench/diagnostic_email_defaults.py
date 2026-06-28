@@ -1,8 +1,8 @@
 """Build-time developer diagnostic email defaults.
 
-These constants are intentionally empty in source. The Windows release workflow
-rewrites this module inside the build runner so packaged apps can send support
-diagnostics without writing email secrets into git history.
+The secret-bearing values are intentionally empty in source. The Windows release
+workflow rewrites this module inside the build runner so packaged apps can send
+support diagnostics without writing email secrets into git history.
 """
 
 RECIPIENT = ""

@@ -298,8 +298,10 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
         json={"recipient": "support@example.com", "smtp_host": "smtp.example.com", "smtp_username": "mailer@example.com"},
     )
     test_email = client.post("/settings/diagnostic-email/test")
-    oauth_start = client.post("/settings/diagnostic-email/oauth/gmail/start")
-    oauth_callback = client.get("/settings/diagnostic-email/oauth/gmail/callback?state=oauth-state&code=oauth-code")
+    removed_oauth_start = client.post("/settings/diagnostic-email/oauth/gmail/start")
+    removed_oauth_callback = client.get(
+        "/settings/diagnostic-email/oauth/gmail/callback?state=oauth-state&code=oauth-code"
+    )
     manual = client.post("/diagnostics/email", json={"run_id": None, "include_state_bundle": False})
     cleared = client.delete("/settings/diagnostic-email/credential")
     cleared_all = client.delete("/settings/secrets")
@@ -307,8 +309,8 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
     assert settings.status_code == 200
     assert fake.configured_payload == {"enabled": False}
     assert test_email.json()["sent"] is True
-    assert oauth_start.status_code == 404
-    assert oauth_callback.status_code == 404
+    assert removed_oauth_start.status_code == 404
+    assert removed_oauth_callback.status_code == 404
     assert manual.json()["sent"] is True
     assert cleared.json()["credential_deleted"] is True
     assert cleared_all.json()["diagnostic_email"]["credential_deleted"] is True
