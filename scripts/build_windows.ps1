@@ -109,7 +109,7 @@ function Expand-Template {
 
     $content = Get-Content -Raw -Path $TemplatePath
     foreach ($key in $Values.Keys) {
-        $token = "{{{0}}}" -f $key
+        $token = "{{" + $key + "}}"
         $replacement = [System.Security.SecurityElement]::Escape([string]$Values[$key])
         $content = $content.Replace($token, $replacement)
     }

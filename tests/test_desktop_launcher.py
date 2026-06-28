@@ -108,6 +108,8 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "SignTool.exe" in script
     assert "AppxManifest.xml.in" in script
     assert "PlanCommissionWorkbench.appinstaller.in" in script
+    assert '$token = "{{" + $key + "}}"' in script
+    assert '$token = "{{{0}}}"' not in script
     assert "PlanCommissionWorkbench.msix" in script
     assert "PlanCommissionWorkbench.appinstaller" in script
     assert "PCW_APPINSTALLER_URI" in script
