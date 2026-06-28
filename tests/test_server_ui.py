@@ -55,9 +55,22 @@ def test_run_ui_exposes_diagnostic_email_and_secret_controls() -> None:
     script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "diagnostic-email-form" in template
+    assert 'name="smtp_preset"' in template
+    assert "Google Workspace/Gmail" in template
+    assert "Microsoft 365/Outlook" in template
+    assert "Yahoo Mail" in template
+    assert "iCloud Mail" in template
+    assert "Zoho Mail" in template
     assert "clear-openai-key" in template
     assert "clear-email-secret" in template
     assert "clear-all-secrets" in template
+    assert "smtpPresets" in script
+    assert "smtp.gmail.com" in script
+    assert "smtp.office365.com" in script
+    assert "smtp.mail.yahoo.com" in script
+    assert "smtp.mail.me.com" in script
+    assert "smtp.zoho.com" in script
+    assert "applyDiagnosticEmailPreset" in script
     assert "/settings/diagnostic-email" in script
     assert "/diagnostics/email" in script
     assert "/settings/secrets" in script

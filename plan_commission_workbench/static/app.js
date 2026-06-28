@@ -1,6 +1,13 @@
 const page = document.body.dataset.page;
 let openAiKeyPromptShown = false;
 let selectedRunId = null;
+const smtpPresets = {
+  gmail: {host: "smtp.gmail.com", port: 587, useStarttls: true, useSsl: false},
+  microsoft365: {host: "smtp.office365.com", port: 587, useStarttls: true, useSsl: false},
+  yahoo: {host: "smtp.mail.yahoo.com", port: 587, useStarttls: true, useSsl: false},
+  icloud: {host: "smtp.mail.me.com", port: 587, useStarttls: true, useSsl: false},
+  zoho: {host: "smtp.zoho.com", port: 587, useStarttls: true, useSsl: false},
+};
 
 function $(selector) {
   return document.querySelector(selector);
@@ -92,9 +99,35 @@ async function loadDiagnosticEmailSettings() {
   form.elements.enabled.checked = Boolean(settings.enabled);
   form.elements.use_ssl.checked = Boolean(settings.use_ssl);
   form.elements.use_starttls.checked = Boolean(settings.use_starttls);
+  setDiagnosticEmailPresetFromFields(form);
   if (status) {
     status.textContent = settings.configured ? "Email ready" : settings.credential_saved ? "Email settings incomplete" : "Email not configured";
   }
+}
+
+function setDiagnosticEmailPresetFromFields(form) {
+  const preset = Object.entries(smtpPresets).find(([, config]) => (
+    form.elements.smtp_host.value.trim().toLowerCase() === config.host &&
+    Number(form.elements.smtp_port.value || 587) === config.port &&
+    form.elements.use_starttls.checked === config.useStarttls &&
+    form.elements.use_ssl.checked === config.useSsl
+  ));
+  form.elements.smtp_preset.value = preset ? preset[0] : "";
+}
+
+function applyDiagnosticEmailPreset(event) {
+  const form = event.currentTarget.form;
+  const preset = smtpPresets[event.currentTarget.value];
+  if (!form || !preset) return;
+  form.elements.smtp_host.value = preset.host;
+  form.elements.smtp_port.value = preset.port;
+  form.elements.use_starttls.checked = preset.useStarttls;
+  form.elements.use_ssl.checked = preset.useSsl;
+}
+
+function markDiagnosticEmailPresetCustom(event) {
+  const form = event.currentTarget.form;
+  if (form) form.elements.smtp_preset.value = "";
 }
 
 function diagnosticEmailPayload(form) {
@@ -229,6 +262,11 @@ function setupRunPage() {
   loadRuns().catch(console.error);
   $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
   $("#diagnostic-email-form")?.addEventListener("submit", (event) => saveDiagnosticEmailSettings(event).catch((error) => alert(error.message)));
+  $("#diagnostic-email-form")?.elements.smtp_preset?.addEventListener("change", applyDiagnosticEmailPreset);
+  $("#diagnostic-email-form")?.elements.smtp_host?.addEventListener("input", markDiagnosticEmailPresetCustom);
+  $("#diagnostic-email-form")?.elements.smtp_port?.addEventListener("input", markDiagnosticEmailPresetCustom);
+  $("#diagnostic-email-form")?.elements.use_starttls?.addEventListener("change", markDiagnosticEmailPresetCustom);
+  $("#diagnostic-email-form")?.elements.use_ssl?.addEventListener("change", markDiagnosticEmailPresetCustom);
   $("#test-diagnostic-email")?.addEventListener("click", () => testDiagnosticEmail().catch((error) => alert(error.message)));
   $("#send-diagnostic-email")?.addEventListener("click", () => sendDiagnosticEmail().catch((error) => alert(error.message)));
   $("#clear-openai-key")?.addEventListener("click", () => clearOpenAiKey().catch((error) => alert(error.message)));
