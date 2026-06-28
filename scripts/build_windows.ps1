@@ -301,6 +301,7 @@ function Optimize-MsixPayload {
     }
     Remove-MsixTorchSourcePayload $internalDir
     Restore-TorchConfigSources $internalDir
+    Remove-MsixPurePythonSourcePayload $internalDir @("openai", "transformers")
 
     $fileCount = Get-PayloadFileCount $SourceDirectory
     Write-Host "MSIX staging payload contains $fileCount files after pruning"
@@ -373,6 +374,30 @@ function Get-TorchConfigSourcePaths {
     )
 }
 
+function Remove-MsixPurePythonSourcePayload {
+    param(
+        [string]$InternalDirectory,
+        [string[]]$PackageNames
+    )
+
+    $sourceExtensions = @(".md", ".py", ".pyi", ".rst")
+    foreach ($packageName in $PackageNames) {
+        $packageDir = Join-Path $InternalDirectory $packageName
+        if (-not (Test-Path $packageDir)) {
+            continue
+        }
+        $removedCount = 0
+        foreach ($file in Get-ChildItem -Path $packageDir -File -Recurse -Force) {
+            if ($sourceExtensions -notcontains $file.Extension.ToLowerInvariant()) {
+                continue
+            }
+            Remove-Item -Force $file.FullName
+            $removedCount += 1
+        }
+        Write-Host "Removed $removedCount MSIX staging pure-Python source files from $packageName"
+    }
+}
+
 function Test-StagedExecutable {
     param([string]$SourceDirectory)
 
@@ -382,6 +407,8 @@ function Test-StagedExecutable {
     }
     & $stagedExe --self-test-docling
     Assert-LastExitCode "Staged MSIX executable self-test"
+    & $stagedExe --self-test-runtime-imports
+    Assert-LastExitCode "Staged MSIX runtime import self-test"
 }
 
 function Invoke-MsixSigning {
@@ -563,6 +590,8 @@ if (-not (Test-Path $ExePath)) {
 
 & $ExePath --self-test-docling
 Assert-LastExitCode "Windows executable Docling self-test"
+& $ExePath --self-test-runtime-imports
+Assert-LastExitCode "Windows executable runtime import self-test"
 
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $AppDir "README.md")
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue

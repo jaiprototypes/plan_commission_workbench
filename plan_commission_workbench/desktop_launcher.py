@@ -115,6 +115,15 @@ def run_docling_self_test() -> int:
     return 0
 
 
+def run_runtime_import_self_test() -> int:
+    """Purpose: verify lazy production dependencies survive staged MSIX pruning."""
+
+    import openai  # noqa: F401
+    import transformers  # noqa: F401
+
+    return 0
+
+
 class DesktopLauncher:
     """Purpose: provide a small Windows shell around the local web workbench."""
 
@@ -305,6 +314,8 @@ def main() -> None:
         raise SystemExit(run_worker_main(sys.argv[index + 1 :]))
     if "--self-test-docling" in sys.argv:
         raise SystemExit(run_docling_self_test())
+    if "--self-test-runtime-imports" in sys.argv:
+        raise SystemExit(run_runtime_import_self_test())
     DesktopLauncher().run()
 
 

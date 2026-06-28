@@ -9,6 +9,7 @@ from plan_commission_workbench.desktop_launcher import (
     default_data_dir,
     desktop_log_paths,
     recent_error_summary,
+    run_runtime_import_self_test,
     smoke_test_pdf_bytes,
 )
 
@@ -76,6 +77,10 @@ def test_smoke_test_pdf_bytes_are_valid_pdf_shaped() -> None:
     assert SMOKE_TEST_TEXT.encode("ascii") in payload
 
 
+def test_runtime_import_self_test_loads_lazy_production_dependencies() -> None:
+    assert run_runtime_import_self_test() == 0
+
+
 def test_launcher_file_imports_as_top_level_script() -> None:
     path = ROOT / "plan_commission_workbench" / "desktop_launcher.py"
 
@@ -97,6 +102,7 @@ def test_windows_build_explicitly_bundles_server_module() -> None:
     assert '--collect-all "docling_parse"' in script
     assert '--collect-all "pypdfium2_raw"' in script
     assert "--self-test-docling" in script
+    assert "--self-test-runtime-imports" in script
 
 
 def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
@@ -115,6 +121,7 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "PCW_MSIX_STAGING_ROOT" in script
     assert "Assert-LastExitCode" in script
     assert "Windows executable Docling self-test" in script
+    assert "Windows executable runtime import self-test" in script
     assert "Get-PythonModuleDirectory \"torch\"" in script
     assert "$TorchSourceDir\\utils\\_config_module.py;torch\\utils" in script
     assert "$TorchSourceDir\\_dynamo\\config.py;torch\\_dynamo" in script
@@ -125,6 +132,9 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "Test-StagedExecutable $MsixStagingDir" in script
     assert "Restore-TorchConfigSources" in script
     assert "Remove-MsixTorchSourcePayload" in script
+    assert "Remove-MsixPurePythonSourcePayload" in script
+    assert 'Remove-MsixPurePythonSourcePayload $internalDir @("openai", "transformers")' in script
+    assert "Staged MSIX runtime import self-test" in script
     assert '"torch\\_inductor"' in script
     assert '"torch\\include"' in script
     assert "/f $MsixMappingPath" in script
