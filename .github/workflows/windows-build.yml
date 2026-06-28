@@ -23,6 +23,8 @@ jobs:
       PCW_MSIX_PUBLISHER: ${{ vars.PCW_MSIX_PUBLISHER }}
       PCW_REQUIRE_TRUSTED_SIGNATURE: ${{ vars.PCW_REQUIRE_TRUSTED_SIGNATURE }}
       PCW_UPDATE_RELEASE_TAG: ${{ vars.PCW_UPDATE_RELEASE_TAG }}
+      PCW_GOOGLE_OAUTH_CLIENT_ID: ${{ vars.PCW_GOOGLE_OAUTH_CLIENT_ID }}
+      PCW_MICROSOFT_OAUTH_CLIENT_ID: ${{ vars.PCW_MICROSOFT_OAUTH_CLIENT_ID }}
       PCW_SIGNING_CERTIFICATE_BASE64: ${{ secrets.PCW_SIGNING_CERTIFICATE_BASE64 }}
       PCW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.PCW_SIGNING_CERTIFICATE_PASSWORD }}
 
@@ -103,6 +105,19 @@ jobs:
           $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, $env:PCW_SIGNING_CERTIFICATE_PASSWORD)
           [IO.File]::WriteAllBytes("artifacts\PlanCommissionWorkbench-signing.cer", $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           "PCW_SIGNING_CERTIFICATE_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Bake diagnostic OAuth client IDs
+        shell: pwsh
+        run: |
+          $googleClientId = ([string]$env:PCW_GOOGLE_OAUTH_CLIENT_ID).Replace("'", "''")
+          $microsoftClientId = ([string]$env:PCW_MICROSOFT_OAUTH_CLIENT_ID).Replace("'", "''")
+          $lines = @(
+            '"""Build-time public OAuth client defaults for diagnostic email providers."""',
+            '',
+            "GOOGLE_CLIENT_ID = '$googleClientId'",
+            "MICROSOFT_CLIENT_ID = '$microsoftClientId'"
+          )
+          $lines | Set-Content -Path "plan_commission_workbench\oauth_defaults.py" -Encoding UTF8
 
       - name: Build launcher
         shell: pwsh

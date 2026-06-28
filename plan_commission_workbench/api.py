@@ -331,8 +331,25 @@ class PlanCommissionWorkbench:
 
         return self.diagnostic_email.configure(payload)
 
+    def begin_diagnostic_email_oauth(self, provider: str, redirect_uri: str) -> dict[str, Any]:
+        """Purpose: start a browser OAuth connection for diagnostic email."""
+
+        return self.diagnostic_email.begin_oauth(provider, redirect_uri)
+
+    def finish_diagnostic_email_oauth(
+        self,
+        provider: str,
+        *,
+        state: str,
+        code: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Purpose: complete provider OAuth and save the local token."""
+
+        return self.diagnostic_email.finish_oauth(provider, state=state, code=code, error=error)
+
     def send_test_diagnostic_email(self) -> dict[str, Any]:
-        """Purpose: send a small SMTP validation email."""
+        """Purpose: send a small diagnostic email validation message."""
 
         return self.diagnostic_email.send_test_email()
 

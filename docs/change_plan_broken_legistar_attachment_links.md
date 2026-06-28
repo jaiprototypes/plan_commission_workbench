@@ -224,14 +224,15 @@ emailing state bundles by hand. The app should use a configured email service to
 send compact diagnostic reports back to GECG, with a controlled path for full
 state bundles when needed.
 
-This keeps the production footprint smaller than a hosted listener service. It
-does mean the desktop app must store email-service credentials or an app-specific
-SMTP password on the user's machine, so those credentials must live in Windows
-Credential Manager and never be embedded in the executable.
+This keeps the production footprint smaller than a hosted listener service. The
+preferred Gmail and Microsoft paths should use browser OAuth so the operator does
+not have to manage mailbox passwords. SMTP remains the fallback for iCloud,
+Yahoo, Zoho, and custom providers. Any SMTP password or OAuth refresh token must
+live in Windows Credential Manager and never be embedded in the executable.
 
 Preferred communication path:
 
-`Desktop app -> configured SMTP/email service -> GECG diagnostics inbox`
+`Desktop app -> connected Gmail/Microsoft account or SMTP service -> GECG diagnostics inbox`
 
 Future optional path:
 
@@ -265,6 +266,9 @@ Install identity:
 Email configuration:
 
 - Support recipient email.
+- Delivery method: Gmail OAuth, Microsoft OAuth, or SMTP fallback.
+- Gmail/Microsoft public OAuth client ID, preferably baked into the signed
+  Windows build from GitHub repository variables.
 - SMTP host and port.
 - TLS mode.
 - SMTP username.
@@ -276,9 +280,10 @@ Email configuration:
 - Clear stored email-service credential.
 - Clear all stored workbench secrets.
 
-The SMTP password or email-service token must be saved in Windows Credential
+The SMTP password or OAuth refresh token must be saved in Windows Credential
 Manager. It must not be stored in SQLite, logs, state bundles, source control, or
-the packaged executable.
+the packaged executable. OAuth client IDs are public identifiers, not secrets,
+but changing them changes which provider app owns future Gmail/Microsoft consent.
 
 Credential clearing:
 
@@ -309,12 +314,13 @@ Security and privacy:
 Direct email responsibilities:
 
 1. Validate SMTP configuration before enabling automatic failure reports.
-2. Send a small test email from the settings screen.
-3. Generate deterministic subject lines for grouping failures.
-4. Attach compact JSON/text diagnostics automatically.
-5. Attach full state bundles only with operator approval.
-6. Record send success/failure in local logs without logging credentials.
-7. Track duplicate failures by source identity, run status, and error hash.
+2. Connect Gmail/Microsoft through the browser OAuth flow when selected.
+3. Send a small test email from the settings screen.
+4. Generate deterministic subject lines for grouping failures.
+5. Attach compact JSON/text diagnostics automatically.
+6. Attach full state bundles only with operator approval.
+7. Record send success/failure in local logs without logging credentials.
+8. Track duplicate failures by source identity, run status, and error hash.
 
 Diagnostic report contents:
 

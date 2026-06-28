@@ -151,6 +151,10 @@ h2 {
   justify-content: flex-start;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .export-tools {
   display: grid;
   gap: 8px;

@@ -1,39 +1,72 @@
-"""Diagnostic email settings, reports, and SMTP delivery."""
+"""Diagnostic email settings, reports, and provider delivery."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from email.message import EmailMessage
 import hashlib
 from importlib import metadata
 import json
+import os
 from pathlib import Path
 import smtplib
 import ssl
+import time
 from typing import Any
 import uuid
 
+from . import oauth_defaults
+from .email_oauth import (
+    GMAIL_DELIVERY_METHOD,
+    GOOGLE_PROVIDER,
+    MICROSOFT_DELIVERY_METHOD,
+    MICROSOFT_PROVIDER,
+    OAUTH_DELIVERY_METHODS,
+    OAUTH_PROVIDER_CONFIGS,
+    GmailApiDiagnosticEmailSender,
+    MicrosoftGraphDiagnosticEmailSender,
+    OAuthProviderClient,
+    PendingOAuthRequest,
+    OAuthToken,
+    build_diagnostic_message,
+)
 from .settings import CredentialStore, WindowsCredentialStore
 from .storage import ReviewStore
 
 
 EMAIL_PASSWORD_TARGET = "PlanCommissionWorkbench/DiagnosticEmailPassword"
+GOOGLE_OAUTH_TARGET = "PlanCommissionWorkbench/DiagnosticEmailGoogleOAuth"
+MICROSOFT_OAUTH_TARGET = "PlanCommissionWorkbench/DiagnosticEmailMicrosoftOAuth"
 SETTINGS_FILENAME = "settings.json"
+SMTP_DELIVERY_METHOD = "smtp"
+OAUTH_PENDING_TTL_SECONDS = 600
 
 
 class DiagnosticEmailError(RuntimeError):
     """Purpose: report diagnostic email failures without leaking credentials."""
 
 
+def _clean_delivery_method(value: str) -> str:
+    """Purpose: keep older settings files on SMTP and reject bad UI values."""
+
+    cleaned = value.strip().lower()
+    if cleaned in {SMTP_DELIVERY_METHOD, GMAIL_DELIVERY_METHOD, MICROSOFT_DELIVERY_METHOD}:
+        return cleaned
+    return SMTP_DELIVERY_METHOD
+
+
 @dataclass
 class DiagnosticEmailSettings:
     """Purpose: persist non-secret diagnostic email configuration."""
 
+    delivery_method: str = SMTP_DELIVERY_METHOD
     recipient: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
     sender: str = ""
+    google_client_id: str = ""
+    microsoft_client_id: str = ""
+    oauth_email: str = ""
     use_ssl: bool = False
     use_starttls: bool = True
     enabled: bool = False
@@ -44,34 +77,58 @@ class DiagnosticEmailSettings:
 
         raw = raw or {}
         return cls(
+            delivery_method=_clean_delivery_method(str(raw.get("delivery_method") or SMTP_DELIVERY_METHOD)),
             recipient=str(raw.get("recipient") or ""),
             smtp_host=str(raw.get("smtp_host") or ""),
             smtp_port=int(raw.get("smtp_port") or 587),
             smtp_username=str(raw.get("smtp_username") or ""),
             sender=str(raw.get("sender") or ""),
+            google_client_id=str(raw.get("google_client_id") or ""),
+            microsoft_client_id=str(raw.get("microsoft_client_id") or ""),
+            oauth_email=str(raw.get("oauth_email") or ""),
             use_ssl=bool(raw.get("use_ssl", False)),
             use_starttls=bool(raw.get("use_starttls", True)),
             enabled=bool(raw.get("enabled", False)),
         )
 
-    def public_dict(self, *, credential_saved: bool) -> dict[str, Any]:
-        """Purpose: expose email settings without the SMTP secret."""
+    def public_dict(
+        self,
+        *,
+        credential_saved: bool,
+        oauth_token_saved: bool,
+        oauth_client_configured: bool,
+    ) -> dict[str, Any]:
+        """Purpose: expose email settings without SMTP or OAuth secrets."""
 
         return {
             **asdict(self),
             "credential_saved": credential_saved,
-            "configured": self.is_configured(credential_saved),
+            "oauth_token_saved": oauth_token_saved,
+            "oauth_client_configured": oauth_client_configured,
+            "configured": self.is_configured(
+                credential_saved=credential_saved,
+                oauth_token_saved=oauth_token_saved,
+                oauth_client_configured=oauth_client_configured,
+            ),
         }
 
-    def is_configured(self, credential_saved: bool) -> bool:
-        """Purpose: decide whether SMTP sending has enough configuration."""
+    def is_configured(
+        self,
+        *,
+        credential_saved: bool,
+        oauth_token_saved: bool = False,
+        oauth_client_configured: bool = False,
+    ) -> bool:
+        """Purpose: decide whether the selected provider can send."""
 
-        return bool(self.recipient and self.smtp_host and self.smtp_username and credential_saved)
+        if self.delivery_method == SMTP_DELIVERY_METHOD:
+            return bool(self.recipient and self.smtp_host and self.smtp_username and credential_saved)
+        return bool(self.recipient and self.from_address() and oauth_client_configured and oauth_token_saved)
 
     def from_address(self) -> str:
         """Purpose: choose a usable sender address from configured fields."""
 
-        return self.sender or self.smtp_username
+        return self.sender or self.smtp_username or self.oauth_email
 
 
 class LocalSettingsStore:
@@ -153,13 +210,7 @@ class SmtpDiagnosticEmailSender:
     ) -> None:
         """Purpose: send one diagnostic message with optional local files."""
 
-        message = EmailMessage()
-        message["From"] = settings.from_address()
-        message["To"] = settings.recipient
-        message["Subject"] = subject
-        message.set_content(body)
-        for path in attachments or []:
-            self._attach_file(message, path)
+        message = build_diagnostic_message(settings, subject, body, attachments)
         try:
             if settings.use_ssl:
                 with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=self.timeout_seconds) as smtp:
@@ -179,15 +230,6 @@ class SmtpDiagnosticEmailSender:
             smtp.login(settings.smtp_username, password)
         smtp.send_message(message)
 
-    def _attach_file(self, message: EmailMessage, path: Path) -> None:
-        """Purpose: attach one diagnostics artifact by filename."""
-
-        payload = path.read_bytes()
-        if path.suffix.lower() == ".zip":
-            message.add_attachment(payload, maintype="application", subtype="zip", filename=path.name)
-            return
-        message.add_attachment(payload, maintype="application", subtype="octet-stream", filename=path.name)
-
 
 class DiagnosticEmailService:
     """Purpose: coordinate diagnostic settings, reports, and delivery."""
@@ -202,6 +244,11 @@ class DiagnosticEmailService:
         store: ReviewStore,
         credential_store: CredentialStore | None = None,
         sender: SmtpDiagnosticEmailSender | None = None,
+        google_oauth_store: CredentialStore | None = None,
+        microsoft_oauth_store: CredentialStore | None = None,
+        gmail_sender: GmailApiDiagnosticEmailSender | None = None,
+        microsoft_sender: MicrosoftGraphDiagnosticEmailSender | None = None,
+        oauth_http=None,
     ) -> None:
         self.settings_store = LocalSettingsStore(data_dir)
         self.server_log_path = server_log_path
@@ -210,13 +257,36 @@ class DiagnosticEmailService:
         self.store = store
         self.credential_store = credential_store or WindowsCredentialStore(EMAIL_PASSWORD_TARGET)
         self.sender = sender or SmtpDiagnosticEmailSender()
+        self.oauth_stores = {
+            GOOGLE_PROVIDER: google_oauth_store or WindowsCredentialStore(GOOGLE_OAUTH_TARGET),
+            MICROSOFT_PROVIDER: microsoft_oauth_store or WindowsCredentialStore(MICROSOFT_OAUTH_TARGET),
+        }
+        self.oauth_clients = {
+            provider: OAuthProviderClient(config, http=oauth_http)
+            for provider, config in OAUTH_PROVIDER_CONFIGS.items()
+        }
+        self.oauth_senders = {
+            GOOGLE_PROVIDER: gmail_sender or GmailApiDiagnosticEmailSender(),
+            MICROSOFT_PROVIDER: microsoft_sender or MicrosoftGraphDiagnosticEmailSender(),
+        }
+        self.pending_oauth: dict[str, PendingOAuthRequest] = {}
 
     def status(self) -> dict[str, Any]:
         """Purpose: expose diagnostic email readiness without secrets."""
 
+        settings = self.settings_store.email_settings()
+        provider = self._provider_for_settings(settings)
+        oauth_token_saved = self.oauth_token_saved(provider) if provider else False
+        oauth_client_configured = self.oauth_client_configured(provider, settings) if provider else False
         return {
             "support_install_id": self.settings_store.support_install_id(),
-            **self.settings_store.email_settings().public_dict(credential_saved=self.email_credential_saved()),
+            "google_oauth_client_configured": self.oauth_client_configured(GOOGLE_PROVIDER, settings),
+            "microsoft_oauth_client_configured": self.oauth_client_configured(MICROSOFT_PROVIDER, settings),
+            **settings.public_dict(
+                credential_saved=self.email_credential_saved(),
+                oauth_token_saved=oauth_token_saved,
+                oauth_client_configured=oauth_client_configured,
+            ),
         }
 
     def configure(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -234,13 +304,23 @@ class DiagnosticEmailService:
         return result
 
     def clear_email_credential(self) -> dict[str, Any]:
-        """Purpose: remove the stored SMTP credential only."""
+        """Purpose: remove stored SMTP and OAuth diagnostic email secrets."""
 
+        deleted = False
+        errors = []
         try:
-            deleted = self.credential_store.delete_secret()
+            deleted = self.credential_store.delete_secret() or deleted
         except Exception as exc:
-            return {"credential_deleted": False, "credential_error": str(exc), **self.status()}
-        return {"credential_deleted": deleted, **self.status()}
+            errors.append(str(exc))
+        for store in self.oauth_stores.values():
+            try:
+                deleted = store.delete_secret() or deleted
+            except Exception as exc:
+                errors.append(str(exc))
+        result = {"credential_deleted": deleted, **self.status()}
+        if errors:
+            result["credential_error"] = "; ".join(errors)
+        return result
 
     def email_credential_saved(self) -> bool:
         """Purpose: report whether an SMTP secret is available."""
@@ -250,10 +330,76 @@ class DiagnosticEmailService:
         except Exception:
             return False
 
-    def send_test_email(self) -> dict[str, Any]:
-        """Purpose: validate SMTP settings with a small message."""
+    def oauth_token_saved(self, provider: str | None) -> bool:
+        """Purpose: report whether a provider token is saved locally."""
 
-        settings, password = self._configured_settings()
+        if not provider:
+            return False
+        store = self.oauth_stores.get(provider)
+        if not store:
+            return False
+        try:
+            return bool(store.read_secret())
+        except Exception:
+            return False
+
+    def oauth_client_configured(self, provider: str | None, settings: DiagnosticEmailSettings | None = None) -> bool:
+        """Purpose: report whether this build/settings can start OAuth."""
+
+        if not provider:
+            return False
+        return bool(self._oauth_client_id(provider, settings or self.settings_store.email_settings()))
+
+    def begin_oauth(self, provider: str, redirect_uri: str) -> dict[str, Any]:
+        """Purpose: create a provider authorization URL for the browser."""
+
+        provider = self._clean_provider(provider)
+        settings = self.settings_store.email_settings()
+        client_id = self._oauth_client_id(provider, settings)
+        if not client_id:
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} OAuth client ID is not configured")
+        pending = self.oauth_clients[provider].create_authorization_request(client_id=client_id, redirect_uri=redirect_uri)
+        self._prune_pending_oauth()
+        self.pending_oauth[pending.state] = pending
+        return {
+            "provider": provider,
+            "authorization_url": pending.authorization_url,
+            "expires_in": OAUTH_PENDING_TTL_SECONDS,
+        }
+
+    def finish_oauth(
+        self,
+        provider: str,
+        *,
+        state: str,
+        code: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Purpose: exchange the browser callback code and save the token."""
+
+        provider = self._clean_provider(provider)
+        if error:
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} authorization failed: {error}")
+        if not code:
+            raise DiagnosticEmailError("OAuth callback did not include an authorization code")
+        pending = self.pending_oauth.pop(state, None)
+        if not pending or pending.provider != provider:
+            raise DiagnosticEmailError("OAuth callback state was not recognized")
+        if time.time() - pending.created_at > OAUTH_PENDING_TTL_SECONDS:
+            raise DiagnosticEmailError("OAuth callback expired; start the connection again")
+        settings = self.settings_store.email_settings()
+        client_id = self._oauth_client_id(provider, settings)
+        token = self.oauth_clients[provider].exchange_code(client_id=client_id, code=code, pending=pending)
+        self._write_oauth_token(provider, token)
+        settings.delivery_method = self._delivery_method_for_provider(provider)
+        settings.oauth_email = token.email or settings.oauth_email
+        self.settings_store.save_email_settings(settings)
+        return {"connected": True, "provider": provider, "email": token.email, **self.status()}
+
+    def send_test_email(self) -> dict[str, Any]:
+        """Purpose: validate selected diagnostic email delivery with a small message."""
+
+        settings = self._configured_settings()
         subject = self._subject("test", None)
         body = json.dumps(
             {
@@ -263,7 +409,7 @@ class DiagnosticEmailService:
             },
             indent=2,
         )
-        self.sender.send(settings=settings, password=password, subject=subject, body=body)
+        self._send_message(settings=settings, subject=subject, body=body)
         return {"sent": True, **self.status()}
 
     def send_run_report(
@@ -275,12 +421,11 @@ class DiagnosticEmailService:
     ) -> dict[str, Any]:
         """Purpose: send a manual diagnostic report and optional bundle."""
 
-        settings, password = self._configured_settings()
+        settings = self._configured_settings()
         report = self.build_report(run_id)
         attachments = [state_bundle_path] if include_state_bundle and state_bundle_path else []
-        self.sender.send(
+        self._send_message(
             settings=settings,
-            password=password,
             subject=self._subject("manual", run_id),
             body=json.dumps(report, indent=2, default=str),
             attachments=attachments,
@@ -298,11 +443,10 @@ class DiagnosticEmailService:
             self.store.log_event(run_id, "diagnostic_email_duplicate_skipped", "diagnostics", None, "Skipped duplicate diagnostic email")
             return
         try:
-            settings, password = self._configured_settings()
+            settings = self._configured_settings()
             report = self.build_report(run_id)
-            self.sender.send(
+            self._send_message(
                 settings=settings,
-                password=password,
                 subject=self._subject("failure", run_id),
                 body=json.dumps(report, indent=2, default=str),
             )
@@ -331,18 +475,50 @@ class DiagnosticEmailService:
             },
         }
 
-    def _configured_settings(self) -> tuple[DiagnosticEmailSettings, str]:
-        """Purpose: load validated settings and the stored SMTP secret."""
+    def _configured_settings(self) -> DiagnosticEmailSettings:
+        """Purpose: load validated settings for the selected delivery method."""
 
         settings = self.settings_store.email_settings()
-        password = ""
+        provider = self._provider_for_settings(settings)
+        if not settings.is_configured(
+            credential_saved=self.email_credential_saved(),
+            oauth_token_saved=self.oauth_token_saved(provider) if provider else False,
+            oauth_client_configured=self.oauth_client_configured(provider, settings) if provider else False,
+        ):
+            raise DiagnosticEmailError("Diagnostic email settings are incomplete")
+        return settings
+
+    def _send_message(
+        self,
+        *,
+        settings: DiagnosticEmailSettings,
+        subject: str,
+        body: str,
+        attachments: list[Path] | None = None,
+    ) -> None:
+        """Purpose: route one diagnostic message through SMTP or API delivery."""
+
+        provider = self._provider_for_settings(settings)
+        if not provider:
+            password = self._read_smtp_password()
+            self.sender.send(settings=settings, password=password, subject=subject, body=body, attachments=attachments)
+            return
+        token = self._fresh_oauth_token(provider, settings)
+        self.oauth_senders[provider].send(
+            settings=settings,
+            access_token=token.access_token,
+            subject=subject,
+            body=body,
+            attachments=attachments,
+        )
+
+    def _read_smtp_password(self) -> str:
+        """Purpose: read the SMTP secret only when SMTP delivery is selected."""
+
         try:
-            password = self.credential_store.read_secret() or ""
+            return self.credential_store.read_secret() or ""
         except Exception as exc:
             raise DiagnosticEmailError(f"Could not read diagnostic email credential: {exc}") from exc
-        if not settings.is_configured(bool(password)):
-            raise DiagnosticEmailError("Diagnostic email settings are incomplete")
-        return settings, password
 
     def _save_password(self, password: str) -> str | None:
         """Purpose: store SMTP credential without interrupting settings save."""
@@ -354,6 +530,89 @@ class DiagnosticEmailService:
         except Exception as exc:
             return str(exc)
         return None
+
+    def _provider_for_settings(self, settings: DiagnosticEmailSettings) -> str | None:
+        """Purpose: map the selected delivery method to an OAuth provider."""
+
+        return OAUTH_DELIVERY_METHODS.get(settings.delivery_method)
+
+    def _clean_provider(self, provider: str) -> str:
+        """Purpose: reject unsupported OAuth providers before network calls."""
+
+        cleaned = provider.strip().lower()
+        if cleaned not in OAUTH_PROVIDER_CONFIGS:
+            raise DiagnosticEmailError(f"Unsupported diagnostic email OAuth provider: {provider}")
+        return cleaned
+
+    def _delivery_method_for_provider(self, provider: str) -> str:
+        """Purpose: store the matching delivery method after OAuth succeeds."""
+
+        if provider == GOOGLE_PROVIDER:
+            return GMAIL_DELIVERY_METHOD
+        if provider == MICROSOFT_PROVIDER:
+            return MICROSOFT_DELIVERY_METHOD
+        raise DiagnosticEmailError(f"Unsupported diagnostic email OAuth provider: {provider}")
+
+    def _oauth_client_id(self, provider: str, settings: DiagnosticEmailSettings) -> str:
+        """Purpose: prefer local settings, then runtime env, then baked defaults."""
+
+        if provider == GOOGLE_PROVIDER:
+            return (
+                settings.google_client_id.strip()
+                or os.getenv("PCW_GOOGLE_OAUTH_CLIENT_ID", "").strip()
+                or oauth_defaults.GOOGLE_CLIENT_ID.strip()
+            )
+        if provider == MICROSOFT_PROVIDER:
+            return (
+                settings.microsoft_client_id.strip()
+                or os.getenv("PCW_MICROSOFT_OAUTH_CLIENT_ID", "").strip()
+                or oauth_defaults.MICROSOFT_CLIENT_ID.strip()
+            )
+        return ""
+
+    def _read_oauth_token(self, provider: str) -> OAuthToken:
+        """Purpose: read one saved provider token from Credential Manager."""
+
+        try:
+            secret = self.oauth_stores[provider].read_secret() or ""
+        except Exception as exc:
+            raise DiagnosticEmailError(f"Could not read {provider} OAuth token: {exc}") from exc
+        if not secret:
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} is not connected")
+        return OAuthToken.from_secret(secret, provider=provider)
+
+    def _write_oauth_token(self, provider: str, token: OAuthToken) -> None:
+        """Purpose: persist a provider token without writing it to settings JSON."""
+
+        store = self.oauth_stores[provider]
+        if not store.is_available():
+            raise DiagnosticEmailError("Windows Credential Manager is not available on this platform")
+        store.write_secret(token.to_secret())
+
+    def _fresh_oauth_token(self, provider: str, settings: DiagnosticEmailSettings) -> OAuthToken:
+        """Purpose: refresh expired API access tokens before sending mail."""
+
+        token = self._read_oauth_token(provider)
+        if token.access_token_is_fresh():
+            return token
+        client_id = self._oauth_client_id(provider, settings)
+        if not client_id:
+            raise DiagnosticEmailError(f"{OAUTH_PROVIDER_CONFIGS[provider].display_name} OAuth client ID is not configured")
+        refreshed = self.oauth_clients[provider].refresh_access_token(client_id=client_id, token=token)
+        if not refreshed.email:
+            refreshed.email = token.email
+        self._write_oauth_token(provider, refreshed)
+        return refreshed
+
+    def _prune_pending_oauth(self) -> None:
+        """Purpose: discard abandoned browser auth requests."""
+
+        now = time.time()
+        self.pending_oauth = {
+            state: pending
+            for state, pending in self.pending_oauth.items()
+            if now - pending.created_at <= OAUTH_PENDING_TTL_SECONDS
+        }
 
     def _subject(self, kind: str, run_id: int | None) -> str:
         """Purpose: keep diagnostic email grouping deterministic."""

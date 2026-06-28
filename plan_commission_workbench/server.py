@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -48,12 +49,16 @@ class OpenAIKeyRequest(BaseModel):
 
 
 class DiagnosticEmailRequest(BaseModel):
+    delivery_method: str = "smtp"
     recipient: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
     smtp_password: str | None = None
     sender: str = ""
+    google_client_id: str = ""
+    microsoft_client_id: str = ""
+    oauth_email: str = ""
     use_ssl: bool = False
     use_starttls: bool = True
     enabled: bool = False
@@ -62,6 +67,12 @@ class DiagnosticEmailRequest(BaseModel):
 class DiagnosticEmailSendRequest(BaseModel):
     run_id: int | None = None
     include_state_bundle: bool = False
+
+
+def _html_escape(value: str) -> str:
+    """Purpose: safely render provider callback details in a tiny HTML page."""
+
+    return html.escape(value, quote=True)
 
 
 def create_app(start_watchdog: bool = True) -> FastAPI:
@@ -123,6 +134,34 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
     @app.post("/settings/diagnostic-email")
     def configure_diagnostic_email(payload: DiagnosticEmailRequest) -> dict[str, Any]:
         return workbench.configure_diagnostic_email(payload.model_dump())
+
+    @app.post("/settings/diagnostic-email/oauth/{provider}/start")
+    def start_diagnostic_email_oauth(provider: str, request: Request) -> dict[str, Any]:
+        try:
+            redirect_uri = str(request.url_for("diagnostic_email_oauth_callback", provider=provider))
+            return workbench.begin_diagnostic_email_oauth(provider, redirect_uri)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/settings/diagnostic-email/oauth/{provider}/callback", response_class=HTMLResponse)
+    def diagnostic_email_oauth_callback(
+        provider: str,
+        state: str = "",
+        code: str | None = None,
+        error: str | None = None,
+    ) -> HTMLResponse:
+        try:
+            result = workbench.finish_diagnostic_email_oauth(provider, state=state, code=code, error=error)
+        except Exception as exc:
+            return HTMLResponse(
+                f"<html><body><h1>Connection Failed</h1><p>{_html_escape(str(exc))}</p></body></html>",
+                status_code=400,
+            )
+        provider_name = _html_escape(str(result.get("provider") or provider))
+        email = _html_escape(str(result.get("email") or result.get("oauth_email") or "connected account"))
+        return HTMLResponse(
+            f"<html><body><h1>{provider_name.title()} Connected</h1><p>{email}</p><p>You can close this tab.</p></body></html>"
+        )
 
     @app.post("/settings/diagnostic-email/test")
     def test_diagnostic_email() -> dict[str, Any]:

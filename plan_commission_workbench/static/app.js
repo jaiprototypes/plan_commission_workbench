@@ -1,6 +1,9 @@
 const page = document.body.dataset.page;
 let openAiKeyPromptShown = false;
 let selectedRunId = null;
+const SMTP_DELIVERY_METHOD = "smtp";
+const GMAIL_DELIVERY_METHOD = "gmail_oauth";
+const MICROSOFT_DELIVERY_METHOD = "microsoft_oauth";
 const smtpPresets = {
   gmail: {host: "smtp.gmail.com", port: 587, useStarttls: true, useSsl: false},
   microsoft365: {host: "smtp.office365.com", port: 587, useStarttls: true, useSsl: false},
@@ -90,19 +93,45 @@ async function loadDiagnosticEmailSettings() {
   const status = $("#diagnostic-email-status");
   if (!form) return;
   const settings = await getJson("/settings/diagnostic-email");
+  form.elements.delivery_method.value = settings.delivery_method || SMTP_DELIVERY_METHOD;
   form.elements.recipient.value = settings.recipient || "";
   form.elements.smtp_host.value = settings.smtp_host || "";
   form.elements.smtp_port.value = settings.smtp_port || 587;
   form.elements.smtp_username.value = settings.smtp_username || "";
   form.elements.smtp_password.value = "";
   form.elements.sender.value = settings.sender || "";
+  form.elements.google_client_id.value = settings.google_client_id || "";
+  form.elements.microsoft_client_id.value = settings.microsoft_client_id || "";
   form.elements.enabled.checked = Boolean(settings.enabled);
   form.elements.use_ssl.checked = Boolean(settings.use_ssl);
   form.elements.use_starttls.checked = Boolean(settings.use_starttls);
   setDiagnosticEmailPresetFromFields(form);
+  updateDiagnosticEmailMethodFields(form, settings);
   if (status) {
-    status.textContent = settings.configured ? "Email ready" : settings.credential_saved ? "Email settings incomplete" : "Email not configured";
+    status.textContent = diagnosticEmailStatusText(settings);
   }
+}
+
+function diagnosticEmailStatusText(settings) {
+  if (settings.configured) return "Email ready";
+  if (settings.delivery_method === GMAIL_DELIVERY_METHOD && !settings.google_oauth_client_configured) return "Gmail OAuth client ID missing";
+  if (settings.delivery_method === MICROSOFT_DELIVERY_METHOD && !settings.microsoft_oauth_client_configured) return "Microsoft OAuth client ID missing";
+  if (settings.oauth_token_saved) return "OAuth connected; settings incomplete";
+  if (settings.credential_saved) return "Email settings incomplete";
+  return "Email not configured";
+}
+
+function updateDiagnosticEmailMethodFields(form, settings = {}) {
+  const method = form.elements.delivery_method.value || SMTP_DELIVERY_METHOD;
+  const isSmtp = method === SMTP_DELIVERY_METHOD;
+  const isGmail = method === GMAIL_DELIVERY_METHOD;
+  const isMicrosoft = method === MICROSOFT_DELIVERY_METHOD;
+  document.querySelectorAll(".smtp-field").forEach((node) => node.classList.toggle("hidden", !isSmtp));
+  document.querySelectorAll(".oauth-field").forEach((node) => node.classList.toggle("hidden", isSmtp));
+  $("#connect-gmail-oauth")?.classList.toggle("hidden", !isGmail);
+  $("#connect-microsoft-oauth")?.classList.toggle("hidden", !isMicrosoft);
+  form.elements.google_client_id.closest("label")?.classList.toggle("hidden", !isGmail);
+  form.elements.microsoft_client_id.closest("label")?.classList.toggle("hidden", !isMicrosoft);
 }
 
 function setDiagnosticEmailPresetFromFields(form) {
@@ -132,12 +161,15 @@ function markDiagnosticEmailPresetCustom(event) {
 
 function diagnosticEmailPayload(form) {
   return {
+    delivery_method: form.elements.delivery_method.value || SMTP_DELIVERY_METHOD,
     recipient: form.elements.recipient.value.trim(),
     smtp_host: form.elements.smtp_host.value.trim(),
     smtp_port: Number(form.elements.smtp_port.value || 587),
     smtp_username: form.elements.smtp_username.value.trim(),
     smtp_password: form.elements.smtp_password.value,
     sender: form.elements.sender.value.trim(),
+    google_client_id: form.elements.google_client_id.value.trim(),
+    microsoft_client_id: form.elements.microsoft_client_id.value.trim(),
     enabled: form.elements.enabled.checked,
     use_ssl: form.elements.use_ssl.checked,
     use_starttls: form.elements.use_starttls.checked,
@@ -156,6 +188,18 @@ async function saveDiagnosticEmailSettings(event) {
     window.alert(`Email settings saved, but the credential could not be saved.\n${result.credential_error}`);
   }
   await loadDiagnosticEmailSettings();
+}
+
+async function connectDiagnosticEmailProvider(provider) {
+  const form = $("#diagnostic-email-form");
+  if (!form) return;
+  await getJson("/settings/diagnostic-email", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(diagnosticEmailPayload(form)),
+  });
+  const result = await getJson(`/settings/diagnostic-email/oauth/${provider}/start`, {method: "POST"});
+  window.open(result.authorization_url, "_blank", "noopener");
 }
 
 async function testDiagnosticEmail() {
@@ -262,11 +306,14 @@ function setupRunPage() {
   loadRuns().catch(console.error);
   $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
   $("#diagnostic-email-form")?.addEventListener("submit", (event) => saveDiagnosticEmailSettings(event).catch((error) => alert(error.message)));
+  $("#diagnostic-email-form")?.elements.delivery_method?.addEventListener("change", (event) => updateDiagnosticEmailMethodFields(event.currentTarget.form));
   $("#diagnostic-email-form")?.elements.smtp_preset?.addEventListener("change", applyDiagnosticEmailPreset);
   $("#diagnostic-email-form")?.elements.smtp_host?.addEventListener("input", markDiagnosticEmailPresetCustom);
   $("#diagnostic-email-form")?.elements.smtp_port?.addEventListener("input", markDiagnosticEmailPresetCustom);
   $("#diagnostic-email-form")?.elements.use_starttls?.addEventListener("change", markDiagnosticEmailPresetCustom);
   $("#diagnostic-email-form")?.elements.use_ssl?.addEventListener("change", markDiagnosticEmailPresetCustom);
+  $("#connect-gmail-oauth")?.addEventListener("click", () => connectDiagnosticEmailProvider("gmail").catch((error) => alert(error.message)));
+  $("#connect-microsoft-oauth")?.addEventListener("click", () => connectDiagnosticEmailProvider("microsoft").catch((error) => alert(error.message)));
   $("#test-diagnostic-email")?.addEventListener("click", () => testDiagnosticEmail().catch((error) => alert(error.message)));
   $("#send-diagnostic-email")?.addEventListener("click", () => sendDiagnosticEmail().catch((error) => alert(error.message)));
   $("#clear-openai-key")?.addEventListener("click", () => clearOpenAiKey().catch((error) => alert(error.message)));

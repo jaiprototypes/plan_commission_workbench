@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from plan_commission_workbench.diagnostics import DiagnosticEmailService
+from plan_commission_workbench.email_oauth import GMAIL_DELIVERY_METHOD, GOOGLE_PROVIDER, OAuthToken
 from plan_commission_workbench.runtime import WorkbenchRuntime
 from plan_commission_workbench import statuses
 from plan_commission_workbench.storage import ReviewStore
@@ -51,6 +52,24 @@ class FakeEmailSender:
         )
 
 
+class FakeOAuthSender:
+    """Purpose: capture API-based diagnostic sends without provider calls."""
+
+    def __init__(self) -> None:
+        self.messages = []
+
+    def send(self, *, settings, access_token, subject, body, attachments=None) -> None:
+        self.messages.append(
+            {
+                "recipient": settings.recipient,
+                "access_token": access_token,
+                "subject": subject,
+                "body": body,
+                "attachments": attachments or [],
+            }
+        )
+
+
 def make_service(tmp_path: Path) -> tuple[DiagnosticEmailService, ReviewStore, FakeCredentialStore, FakeEmailSender]:
     runtime = WorkbenchRuntime(project_root=tmp_path, data_dir=tmp_path / "data")
     runtime.setup()
@@ -68,6 +87,26 @@ def make_service(tmp_path: Path) -> tuple[DiagnosticEmailService, ReviewStore, F
         sender=sender,
     )
     return service, store, credential_store, sender
+
+
+def make_oauth_service(tmp_path: Path) -> tuple[DiagnosticEmailService, FakeCredentialStore, FakeOAuthSender]:
+    runtime = WorkbenchRuntime(project_root=tmp_path, data_dir=tmp_path / "data")
+    runtime.setup()
+    store = ReviewStore(runtime.db_path)
+    store.initialize()
+    google_store = FakeCredentialStore()
+    gmail_sender = FakeOAuthSender()
+    service = DiagnosticEmailService(
+        data_dir=runtime.data_dir,
+        server_log_path=runtime.server_log_path,
+        server_error_log_path=runtime.server_error_log_path,
+        run_log_dir=runtime.run_log_dir,
+        store=store,
+        credential_store=FakeCredentialStore(),
+        google_oauth_store=google_store,
+        gmail_sender=gmail_sender,
+    )
+    return service, google_store, gmail_sender
 
 
 def email_payload(**overrides):
@@ -149,3 +188,50 @@ def test_automatic_failure_email_deduplicates_same_failure(tmp_path) -> None:
     assert len(sender.messages) == 1
     second_events = store.list_run_events(second_run)
     assert second_events[-1]["stage"] == "diagnostic_email_duplicate_skipped"
+
+
+def test_oauth_diagnostic_email_uses_saved_api_token(tmp_path) -> None:
+    service, google_store, gmail_sender = make_oauth_service(tmp_path)
+    token = OAuthToken(
+        provider=GOOGLE_PROVIDER,
+        access_token="gmail-access-token",
+        refresh_token="gmail-refresh-token",
+        expires_at=9999999999,
+        email="sender@example.com",
+    )
+    google_store.write_secret(token.to_secret())
+    service.configure(
+        email_payload(
+            delivery_method=GMAIL_DELIVERY_METHOD,
+            smtp_password="",
+            smtp_host="",
+            smtp_username="",
+            oauth_email="sender@example.com",
+            google_client_id="google-client-id",
+        )
+    )
+
+    result = service.send_test_email()
+
+    assert result["sent"] is True
+    assert gmail_sender.messages[0]["recipient"] == "support@example.com"
+    assert gmail_sender.messages[0]["access_token"] == "gmail-access-token"
+    assert "gmail-refresh-token" not in gmail_sender.messages[0]["body"]
+
+
+def test_oauth_start_builds_provider_authorization_url(tmp_path) -> None:
+    service, _google_store, _gmail_sender = make_oauth_service(tmp_path)
+    service.configure(
+        email_payload(
+            delivery_method=GMAIL_DELIVERY_METHOD,
+            smtp_password="",
+            google_client_id="google-client-id",
+        )
+    )
+
+    result = service.begin_oauth("gmail", "http://127.0.0.1:8010/settings/diagnostic-email/oauth/gmail/callback")
+
+    assert result["provider"] == "gmail"
+    assert "client_id=google-client-id" in result["authorization_url"]
+    assert "gmail.send" in result["authorization_url"]
+    assert "code_challenge=" in result["authorization_url"]
