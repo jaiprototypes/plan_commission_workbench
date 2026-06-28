@@ -138,11 +138,12 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "'[<>:\"|?*\\[\\]]'" in script
     assert '$mappingLine = \'"{0}" "{1}"\' -f $sourcePath, $relativePath' in script
     assert "Optimize-MsixPayload $MsixStagingDir" in script
-    assert "$graphics.FillPolygon($accent" in script
+    assert "$graphics.DrawArc($main" in script
+    assert "$graphics.DrawLine($main" in script
+    assert "$highlightGreen" in script
     assert "Get-StableLogoHash" in script
-    assert "$rotationRadians" in script
+    assert "$tiltDegrees" in script
     assert 'New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150 $resolvedVersion' in script
-    assert "$index -lt 10" in script
     assert "Test-StagedExecutable $MsixStagingDir" in script
     assert "Restore-TorchConfigSources" in script
     assert "Remove-MsixTorchSourcePayload" in script

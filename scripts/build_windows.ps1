@@ -201,40 +201,61 @@ function New-MsixLogo {
 
     Add-Type -AssemblyName System.Drawing
     $hash = Get-StableLogoHash $VariationKey
-    $red = 238 + ($hash % 15)
-    $green = 190 + [int]([Math]::Floor($hash / 7) % 31)
-    $blue = 20 + [int]([Math]::Floor($hash / 13) % 30)
+    $markRed = 18 + ($hash % 16)
+    $markGreen = 126 + [int]([Math]::Floor($hash / 7) % 38)
+    $markBlue = 58 + [int]([Math]::Floor($hash / 13) % 28)
+    $highlightRed = 204 + [int]([Math]::Floor($hash / 5) % 36)
+    $highlightGreen = 224 + [int]([Math]::Floor($hash / 11) % 26)
+    $highlightBlue = 18 + [int]([Math]::Floor($hash / 17) % 38)
     $bitmap = New-Object System.Drawing.Bitmap($Size, $Size)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $background = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(31, 41, 55))
-    $shadow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(70, 0, 0, 0))
-    $accent = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($red, $green, $blue))
+    $shadow = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(85, 0, 0, 0), [single]([Math]::Max(5, $Size * 0.17)))
+    $main = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb($markRed, $markGreen, $markBlue), [single]([Math]::Max(5, $Size * 0.17)))
+    $highlight = [System.Drawing.Pen]::new(
+        [System.Drawing.Color]::FromArgb($highlightRed, $highlightGreen, $highlightBlue),
+        [single]([Math]::Max(3, $Size * 0.065))
+    )
     try {
+        foreach ($pen in @($shadow, $main, $highlight)) {
+            $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+            $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+            $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        }
         $graphics.FillRectangle($background, 0, 0, $Size, $Size)
-        $center = [double]$Size / 2
-        $outerRadius = [double]$Size * 0.36
-        $innerRadius = $outerRadius * (0.42 + (($hash % 9) * 0.01))
-        $rotationRadians = (($hash % 13) - 6) * [Math]::PI / 180
-        $points = @()
-        for ($index = 0; $index -lt 10; $index++) {
-            $radius = if ($index % 2 -eq 0) { $outerRadius } else { $innerRadius }
-            $angle = -[Math]::PI / 2 + $rotationRadians + $index * [Math]::PI / 5
-            $points += [System.Drawing.PointF]::new(
-                [single]($center + [Math]::Cos($angle) * $radius),
-                [single]($center + [Math]::Sin($angle) * $radius)
-            )
-        }
-        $shadowOffset = [Math]::Max(1, [int]($Size * 0.035))
-        $shadowPoints = foreach ($point in $points) {
-            [System.Drawing.PointF]::new($point.X + $shadowOffset, $point.Y + $shadowOffset)
-        }
-        $graphics.FillPolygon($shadow, [System.Drawing.PointF[]]$shadowPoints)
-        $graphics.FillPolygon($accent, [System.Drawing.PointF[]]$points)
+        $center = [single]($Size / 2)
+        $tiltDegrees = (($hash % 9) - 4) * 0.75
+        $graphics.TranslateTransform($center, $center)
+        $graphics.RotateTransform([single]$tiltDegrees)
+        $graphics.TranslateTransform(-$center, -$center)
+
+        $margin = [single]($Size * 0.22)
+        $rect = [System.Drawing.RectangleF]::new($margin, $margin, [single]($Size - 2 * $margin), [single]($Size - 2 * $margin))
+        $shadowOffset = [single]([Math]::Max(1, $Size * 0.035))
+        $shadowRect = [System.Drawing.RectangleF]::new(
+            $rect.X + $shadowOffset,
+            $rect.Y + $shadowOffset,
+            $rect.Width,
+            $rect.Height
+        )
+        $barY = [single]($center + ($Size * 0.035))
+        $barStart = [single]($center - ($Size * 0.02))
+        $barEnd = [single]($Size - ($margin * 0.62))
+        $tailEnd = [single]($center + ($Size * (0.24 + (($hash % 5) * 0.008))))
+
+        $graphics.DrawArc($shadow, $shadowRect, 24, 306)
+        $graphics.DrawLine($shadow, $barStart + $shadowOffset, $barY + $shadowOffset, $barEnd + $shadowOffset, $barY + $shadowOffset)
+        $graphics.DrawLine($shadow, $barEnd + $shadowOffset, $barY + $shadowOffset, $barEnd + $shadowOffset, $tailEnd + $shadowOffset)
+        $graphics.DrawArc($main, $rect, 24, 306)
+        $graphics.DrawLine($main, $barStart, $barY, $barEnd, $barY)
+        $graphics.DrawLine($main, $barEnd, $barY, $barEnd, $tailEnd)
+        $graphics.DrawArc($highlight, $rect, 204, 132 + ($hash % 19))
         $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     }
     finally {
-        $accent.Dispose()
+        $highlight.Dispose()
+        $main.Dispose()
         $shadow.Dispose()
         $background.Dispose()
         $graphics.Dispose()
