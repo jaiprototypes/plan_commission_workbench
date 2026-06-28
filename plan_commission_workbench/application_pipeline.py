@@ -84,6 +84,16 @@ class ApplicationPipeline:
                 f"Application source already completed by extraction {completed_source['id']}",
             )
             return
+        unavailable_source = self.store.unavailable_application_source(attachment.source_url, attachment.attachment_id)
+        if unavailable_source:
+            self.store.log_event(
+                run_id,
+                "application_skip_unavailable_source",
+                "application",
+                identity,
+                f"Application source already marked unavailable by source {unavailable_source['id']}",
+            )
+            return
         source_id = self.store.upsert_source_item(
             run_id=run_id,
             source_kind="application",
@@ -107,6 +117,22 @@ class ApplicationPipeline:
         try:
             downloaded = self.legistar.download_file(attachment.source_url, pdf_path)
         except DownloadError as exc:
+            if exc.is_durable_missing():
+                pdf_path.unlink(missing_ok=True)
+                self.store.set_source_status(source_id, statuses.APPLICATION_UNAVAILABLE)
+                self.store.log_event(
+                    run_id,
+                    statuses.APPLICATION_UNAVAILABLE,
+                    "legistar",
+                    identity,
+                    (
+                        f"Application attachment unavailable; event_id={agenda_item['event_id']}; "
+                        f"matter_id={attachment.city_item_id}; file_id={attachment.file_id}; "
+                        f"attachment_id={attachment.attachment_id}; status_code={exc.status_code}; "
+                        f"url={attachment.source_url}"
+                    ),
+                )
+                return
             self.store.log_event(run_id, statuses.FAILED_APPLICATION_DOWNLOAD, "legistar", identity, str(exc))
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOWNLOAD, str(exc)) from exc
         if not self.store.run_is_running(run_id):

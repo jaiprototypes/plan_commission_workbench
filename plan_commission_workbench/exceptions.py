@@ -21,3 +21,13 @@ class LLMResponseError(RuntimeError):
 
 class DownloadError(RuntimeError):
     """Purpose: identify source PDF download failures."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, url: str | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.url = url
+
+    def is_durable_missing(self) -> bool:
+        """Purpose: classify broken external file links that can be skipped."""
+
+        return self.status_code in {404, 410}

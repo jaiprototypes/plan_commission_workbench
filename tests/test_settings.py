@@ -19,6 +19,7 @@ class FakeCredentialStore:
         self.available = available
         self.read_calls = 0
         self.written_secret: str | None = None
+        self.deleted = False
 
     def is_available(self) -> bool:
         """Purpose: report configured fake store availability."""
@@ -37,6 +38,15 @@ class FakeCredentialStore:
         if self.write_error:
             raise self.write_error
         self.written_secret = secret
+
+    def delete_secret(self) -> bool:
+        """Purpose: capture delete calls without touching real credentials."""
+
+        had_secret = self.secret is not None or self.written_secret is not None
+        self.secret = None
+        self.written_secret = None
+        self.deleted = True
+        return had_secret
 
 
 def test_load_saved_key_from_credential_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,3 +130,15 @@ def test_invalid_saved_key_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert manager.api_key_present() is False
     assert "Saved OpenAI API key is invalid" in str(manager.credential_status()["credential_error"])
+
+
+def test_clear_saved_key_removes_process_and_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-session")
+    store = FakeCredentialStore("sk-saved")
+    manager = OpenAIKeyManager(credential_store=store)
+
+    result = manager.clear_saved_key()
+
+    assert result["credential_deleted"] is True
+    assert store.deleted is True
+    assert manager.api_key_present() is False

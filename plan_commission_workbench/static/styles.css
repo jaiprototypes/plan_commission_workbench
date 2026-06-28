@@ -139,6 +139,18 @@ h2 {
   grid-template-columns: 160px 160px minmax(220px, 1fr) auto;
 }
 
+.settings-form {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+}
+
+.wide-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+}
+
 .export-tools {
   display: grid;
   gap: 8px;
@@ -551,6 +563,7 @@ th {
 
   .grid.two,
   .run-form,
+  .settings-form,
   .export-form,
   .fields,
   .review-field-grid,

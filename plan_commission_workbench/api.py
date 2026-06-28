@@ -14,6 +14,7 @@ import zipfile
 from . import statuses
 from .agenda_pipeline import AgendaPipeline
 from .application_pipeline import ApplicationPipeline
+from .diagnostics import DiagnosticEmailService
 from .docling_adapter import DoclingTextExtractor
 from .exceptions import WorkbenchStop
 from .export import ExportService
@@ -46,6 +47,13 @@ class PlanCommissionWorkbench:
         self.openai_keys = OpenAIKeyManager()
         self.openai_keys.load_saved_key()
         self.llm = llm or LLMJsonClient()
+        self.diagnostic_email = DiagnosticEmailService(
+            data_dir=self.runtime.data_dir,
+            server_log_path=self.runtime.server_log_path,
+            server_error_log_path=self.runtime.server_error_log_path,
+            run_log_dir=self.runtime.run_log_dir,
+            store=self.store,
+        )
 
     def create_madison_run(self, date_from: dt.date, date_to: dt.date, request_text: str | None = None) -> int:
         """Purpose: create a run row before synchronous or background execution."""
@@ -83,9 +91,9 @@ class PlanCommissionWorkbench:
             agenda.process_range(run_id, request, run_tmp)
             return True
         except WorkbenchStop as exc:
-            self.store.fail_run_from_exception(run_id, exc.status, exc)
+            self._fail_run(run_id, exc.status, exc)
         except Exception as exc:  # Defensive catch for unexpected agenda failures.
-            self.store.fail_run_from_exception(run_id, statuses.FAILED_AGENDA_LLM, exc)
+            self._fail_run(run_id, statuses.FAILED_AGENDA_LLM, exc)
         return False
 
     def _execute_application_stage(
@@ -103,9 +111,15 @@ class PlanCommissionWorkbench:
             if self.store.finish_run(run_id, statuses.COMPLETED):
                 self.store.log_event(run_id, "completed", "runner", None, "Run completed")
         except WorkbenchStop as exc:
-            self.store.fail_run_from_exception(run_id, exc.status, exc)
+            self._fail_run(run_id, exc.status, exc)
         except Exception as exc:  # Defensive catch for unexpected application failures.
-            self.store.fail_run_from_exception(run_id, statuses.FAILED_APPLICATION_LLM, exc)
+            self._fail_run(run_id, statuses.FAILED_APPLICATION_LLM, exc)
+
+    def _fail_run(self, run_id: int, status: str, exc: BaseException) -> None:
+        """Purpose: record failures and send configured support diagnostics."""
+
+        self.store.fail_run_from_exception(run_id, status, exc)
+        self.diagnostic_email.send_failure_report_if_enabled(run_id)
 
     def run_madison_range(
         self,
@@ -301,6 +315,47 @@ class PlanCommissionWorkbench:
 
         self.openai_keys.set_process_key(api_key, persist=True)
         return self.openai_status()
+
+    def clear_openai_api_key(self) -> dict[str, Any]:
+        """Purpose: remove the stored OpenAI key without touching workbench data."""
+
+        return self.openai_keys.clear_saved_key()
+
+    def diagnostic_email_status(self) -> dict[str, Any]:
+        """Purpose: expose diagnostic email settings without credentials."""
+
+        return self.diagnostic_email.status()
+
+    def configure_diagnostic_email(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: save diagnostic email settings and optional SMTP secret."""
+
+        return self.diagnostic_email.configure(payload)
+
+    def send_test_diagnostic_email(self) -> dict[str, Any]:
+        """Purpose: send a small SMTP validation email."""
+
+        return self.diagnostic_email.send_test_email()
+
+    def send_diagnostic_email(self, run_id: int | None, *, include_state_bundle: bool = False) -> dict[str, Any]:
+        """Purpose: send a manual diagnostics email and optional state bundle."""
+
+        bundle_path = None
+        if include_state_bundle:
+            bundle_path = Path(self.create_diagnostic_bundle()["path"])
+        return self.diagnostic_email.send_run_report(run_id, include_state_bundle=include_state_bundle, state_bundle_path=bundle_path)
+
+    def clear_diagnostic_email_credential(self) -> dict[str, Any]:
+        """Purpose: remove the stored SMTP/email-service secret."""
+
+        return self.diagnostic_email.clear_email_credential()
+
+    def clear_all_stored_secrets(self) -> dict[str, Any]:
+        """Purpose: clear workbench secrets while preserving local data."""
+
+        return {
+            "openai": self.clear_openai_api_key(),
+            "diagnostic_email": self.clear_diagnostic_email_credential(),
+        }
 
     def require_openai_api_key(self) -> None:
         """Purpose: stop LLM-backed runs before they fail deeper in the pipeline."""

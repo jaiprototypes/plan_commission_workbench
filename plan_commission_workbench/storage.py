@@ -743,6 +743,32 @@ class ReviewStore:
             ).fetchone()
             return dict(row) if row else None
 
+    def unavailable_application_source(self, source_url: str | None, attachment_id: str | None) -> dict[str, Any] | None:
+        """Purpose: find broken external application links already logged."""
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_url:
+            clauses.append("source_url = ?")
+            params.append(source_url)
+        if attachment_id:
+            clauses.append("attachment_id = ?")
+            params.append(attachment_id)
+        if not clauses:
+            return None
+        with self.transaction() as conn:
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM source_items
+                WHERE source_kind = ? AND processing_status = ? AND {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                ("application", statuses.APPLICATION_UNAVAILABLE, *params),
+            ).fetchone()
+            return dict(row) if row else None
+
     def upsert_agenda_item(
         self,
         run_id: int,

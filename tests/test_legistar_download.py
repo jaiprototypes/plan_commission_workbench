@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 import pytest
+import requests
 
 from plan_commission_workbench.docling_adapter import DoclingTextExtractor, WorkerMonitorState
 from plan_commission_workbench.exceptions import DoclingExtractionError, DownloadError
@@ -30,6 +31,17 @@ class FakeResponse:
     def iter_content(self, chunk_size: int):
         for index in range(0, len(self.payload), chunk_size):
             yield self.payload[index : index + chunk_size]
+
+
+class FakeHttpErrorResponse(FakeResponse):
+    """Purpose: mimic a failed streaming HTTP response with a status code."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(b"", {})
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        raise requests.HTTPError(f"{self.status_code} Client Error", response=self)
 
 
 class FakeSession:
@@ -110,6 +122,19 @@ def test_download_file_rejects_truncated_response(tmp_path: Path) -> None:
 
     with pytest.raises(DownloadError, match="truncated"):
         client.download_file("https://example.test/agenda.pdf", tmp_path / "agenda.pdf")
+
+
+def test_download_file_preserves_missing_http_status(tmp_path: Path) -> None:
+    url = "https://webapi.legistar.com/v1/madison/Matters/96005/Attachments/171817/File"
+    client = LegistarClient("madison", session=FakeSession(FakeHttpErrorResponse(404)))
+
+    with pytest.raises(DownloadError) as excinfo:
+        client.download_file(url, tmp_path / "application.pdf")
+
+    error = excinfo.value
+    assert error.status_code == 404
+    assert error.url == url
+    assert error.is_durable_missing()
 
 
 def test_fetch_event_items_reports_visible_retry_attempts(monkeypatch: pytest.MonkeyPatch) -> None:

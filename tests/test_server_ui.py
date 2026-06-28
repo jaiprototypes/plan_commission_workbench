@@ -50,6 +50,19 @@ def test_run_js_can_download_state_bundle() -> None:
     assert "download_url" in script
 
 
+def test_run_ui_exposes_diagnostic_email_and_secret_controls() -> None:
+    template = (PACKAGE_ROOT / "templates" / "run.html").read_text(encoding="utf-8")
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "diagnostic-email-form" in template
+    assert "clear-openai-key" in template
+    assert "clear-email-secret" in template
+    assert "clear-all-secrets" in template
+    assert "/settings/diagnostic-email" in script
+    assert "/diagnostics/email" in script
+    assert "/settings/secrets" in script
+
+
 def test_agenda_js_exposes_review_actions() -> None:
     script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
@@ -212,6 +225,9 @@ def test_server_persists_openai_key_through_key_manager(monkeypatch, tmp_path) -
         def write_secret(self, secret: str) -> None:
             self.written_secret = secret
 
+        def delete_secret(self) -> bool:
+            return False
+
     store = FakeCredentialStore()
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
@@ -226,6 +242,56 @@ def test_server_persists_openai_key_through_key_manager(monkeypatch, tmp_path) -
     assert response.status_code == 200
     assert response.json()["credential_saved"] is True
     assert store.written_secret == "sk-test"
+
+
+def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> None:
+    class FakeDiagnosticEmailService:
+        """Purpose: prove API routes delegate to the diagnostic service."""
+
+        def __init__(self) -> None:
+            self.configured_payload = None
+            self.sent_report = None
+
+        def status(self):
+            return {"recipient": "support@example.com", "configured": True, "credential_saved": True}
+
+        def configure(self, payload):
+            self.configured_payload = payload
+            return {"configured": True, "credential_saved": True, **payload}
+
+        def send_test_email(self):
+            return {"sent": True}
+
+        def send_run_report(self, run_id, *, include_state_bundle=False, state_bundle_path=None):
+            self.sent_report = (run_id, include_state_bundle, state_bundle_path)
+            return {"sent": True, "attached_state_bundle": bool(state_bundle_path)}
+
+        def clear_email_credential(self):
+            return {"credential_deleted": True, "configured": False, "credential_saved": False}
+
+        def send_failure_report_if_enabled(self, _run_id):
+            return None
+
+    fake = FakeDiagnosticEmailService()
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("plan_commission_workbench.api.DiagnosticEmailService", lambda **_kwargs: fake)
+    client = TestClient(create_app(start_watchdog=False))
+
+    settings = client.post(
+        "/settings/diagnostic-email",
+        json={"recipient": "support@example.com", "smtp_host": "smtp.example.com", "smtp_username": "mailer@example.com"},
+    )
+    test_email = client.post("/settings/diagnostic-email/test")
+    manual = client.post("/diagnostics/email", json={"run_id": None, "include_state_bundle": False})
+    cleared = client.delete("/settings/diagnostic-email/credential")
+    cleared_all = client.delete("/settings/secrets")
+
+    assert settings.status_code == 200
+    assert fake.configured_payload["recipient"] == "support@example.com"
+    assert test_email.json()["sent"] is True
+    assert manual.json()["sent"] is True
+    assert cleared.json()["credential_deleted"] is True
+    assert cleared_all.json()["diagnostic_email"]["credential_deleted"] is True
 
 
 def test_run_endpoint_spawns_child_worker(monkeypatch, tmp_path) -> None:

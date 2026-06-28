@@ -27,6 +27,11 @@ class CredentialStore(Protocol):
 
         ...
 
+    def delete_secret(self) -> bool:
+        """Purpose: remove a secret from the local store when present."""
+
+        ...
+
 
 class CredentialStoreError(RuntimeError):
     """Purpose: report local secret-store failures without including secrets."""
@@ -98,6 +103,21 @@ class WindowsCredentialStore:
         cred_write.restype = ctypes.c_bool
         if not cred_write(ctypes.byref(credential), 0):
             raise self._windows_error("write", ctypes.get_last_error())
+
+    def delete_secret(self) -> bool:
+        """Purpose: remove this target from Windows Credential Manager."""
+
+        if not self.is_available():
+            return False
+        cred_delete = self._library().CredDeleteW
+        cred_delete.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong]
+        cred_delete.restype = ctypes.c_bool
+        if cred_delete(self.target_name, self._credential_type, 0):
+            return True
+        error = ctypes.get_last_error()
+        if error == self._error_not_found:
+            return False
+        raise self._windows_error("delete", error)
 
     def _library(self):
         """Purpose: load Advapi32 lazily so non-Windows tests can import."""
@@ -207,6 +227,21 @@ class OpenAIKeyManager:
             "credential_saved": self.credential_saved,
             "credential_error": self.credential_error,
         }
+
+    def clear_saved_key(self, *, clear_process: bool = True) -> dict[str, object]:
+        """Purpose: remove the local OpenAI key without touching app data."""
+
+        if clear_process:
+            os.environ.pop(self.env_name, None)
+        try:
+            deleted = self.credential_store.delete_secret()
+        except Exception as exc:
+            self.credential_error = str(exc)
+            return {"credential_deleted": False, **self.credential_status()}
+        self.credential_loaded = False
+        self.credential_saved = False
+        self.credential_error = None
+        return {"credential_deleted": deleted, **self.credential_status()}
 
     def prompt_if_missing(self, *, required: bool) -> bool:
         """Purpose: ask terminal users for a credited key without echoing it."""

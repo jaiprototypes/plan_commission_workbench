@@ -118,13 +118,52 @@ Build locally on Windows:
 .\scripts\build_windows.ps1
 ```
 
-The build writes `artifacts\PlanCommissionWorkbench-windows.zip`. Unzip the
-archive and run `PlanCommissionWorkbench\PlanCommissionWorkbench.exe` from the
-extracted folder. Keep the folder contents together; the build intentionally
-uses a directory layout so large native Docling/OCR dependencies do not expand
-into `%TEMP%` on every launch. The GitHub Actions workflow in
-`.github/workflows/windows-build.yml` builds the same artifact on pushes to
-`main`, pull requests, and manual workflow dispatch.
+The build writes three desktop artifacts:
+
+- `artifacts\PlanCommissionWorkbench-windows.zip`: fallback portable folder.
+- `artifacts\PlanCommissionWorkbench.msix`: Windows package.
+- `artifacts\PlanCommissionWorkbench.appinstaller`: update entry point.
+
+The zip remains available as a fallback. For production installs, publish the
+`.msix` and `.appinstaller` files to stable HTTPS URLs, then install from the
+`.appinstaller` file. Windows App Installer will check that same App Installer
+URI on launch and apply newer MSIX versions when they are published.
+
+Useful MSIX build settings:
+
+```powershell
+$env:PCW_APPINSTALLER_URI = "https://example.com/PlanCommissionWorkbench.appinstaller"
+$env:PCW_MSIX_PACKAGE_URI = "https://example.com/PlanCommissionWorkbench.msix"
+$env:PCW_MSIX_PUBLISHER = "CN=Your Signing Publisher"
+$env:PCW_SIGNING_CERTIFICATE_PATH = "C:\certs\pcw-signing.pfx"
+$env:PCW_SIGNING_CERTIFICATE_PASSWORD = "pfx-password"
+.\scripts\build_windows.ps1
+```
+
+The MSIX must be signed before App Installer can install or update it. The
+publisher in `PCW_MSIX_PUBLISHER` must match the signing certificate subject, and
+future updates must use the same package name and publisher. For a local test
+only, run `.\scripts\build_windows.ps1 -CreateTestCertificate`; it exports
+`artifacts\PlanCommissionWorkbench-test.cer`, which must be trusted on the target
+machine before installing.
+
+Before testing on a production PC, use the GitHub Actions build as the first
+gate. The workflow builds the zip/MSIX/App Installer artifacts, unpacks the MSIX,
+checks that `AppxManifest.xml` and the `.appinstaller` identities match, confirms
+update settings are present, and verifies that the MSIX has a signature. Set
+repository variable `PCW_REQUIRE_TRUSTED_SIGNATURE=true` only when the CI runner
+can validate the signing certificate chain; otherwise the gate verifies that a
+signature is present but does not require chain trust.
+
+Keep the portable folder contents together when using the zip fallback; the
+build intentionally uses a directory layout so large native Docling/OCR
+dependencies do not expand into `%TEMP%` on every launch. The GitHub Actions
+workflow in `.github/workflows/windows-build.yml` builds the zip, MSIX, and App
+Installer artifacts on pushes to `main`, pull requests, and manual workflow
+dispatch. Set repository variables `PCW_APPINSTALLER_URI`,
+`PCW_MSIX_PACKAGE_URI`, and `PCW_MSIX_PUBLISHER`, plus secrets
+`PCW_SIGNING_CERTIFICATE_BASE64` and `PCW_SIGNING_CERTIFICATE_PASSWORD`, for a
+signed CI build.
 
 ## Tests
 

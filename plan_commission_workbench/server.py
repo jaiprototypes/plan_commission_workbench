@@ -47,6 +47,23 @@ class OpenAIKeyRequest(BaseModel):
     api_key: str
 
 
+class DiagnosticEmailRequest(BaseModel):
+    recipient: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str | None = None
+    sender: str = ""
+    use_ssl: bool = False
+    use_starttls: bool = True
+    enabled: bool = False
+
+
+class DiagnosticEmailSendRequest(BaseModel):
+    run_id: int | None = None
+    include_state_bundle: bool = False
+
+
 def create_app(start_watchdog: bool = True) -> FastAPI:
     """Purpose: expose the standalone workbench through API and UI."""
 
@@ -94,6 +111,33 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
             return workbench.configure_openai_api_key(payload.api_key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/settings/openai-api-key")
+    def clear_openai_api_key() -> dict[str, Any]:
+        return workbench.clear_openai_api_key()
+
+    @app.get("/settings/diagnostic-email")
+    def diagnostic_email_settings() -> dict[str, Any]:
+        return workbench.diagnostic_email_status()
+
+    @app.post("/settings/diagnostic-email")
+    def configure_diagnostic_email(payload: DiagnosticEmailRequest) -> dict[str, Any]:
+        return workbench.configure_diagnostic_email(payload.model_dump())
+
+    @app.post("/settings/diagnostic-email/test")
+    def test_diagnostic_email() -> dict[str, Any]:
+        try:
+            return workbench.send_test_diagnostic_email()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/settings/diagnostic-email/credential")
+    def clear_diagnostic_email_credential() -> dict[str, Any]:
+        return workbench.clear_diagnostic_email_credential()
+
+    @app.delete("/settings/secrets")
+    def clear_all_stored_secrets() -> dict[str, Any]:
+        return workbench.clear_all_stored_secrets()
 
     @app.post("/runs/madison")
     def run_madison(payload: MadisonRunRequest) -> dict[str, Any]:
@@ -203,6 +247,13 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
             return workbench.create_diagnostic_bundle()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Could not create diagnostics bundle: {exc}") from exc
+
+    @app.post("/diagnostics/email")
+    def send_diagnostics_email(payload: DiagnosticEmailSendRequest) -> dict[str, Any]:
+        try:
+            return workbench.send_diagnostic_email(payload.run_id, include_state_bundle=payload.include_state_bundle)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/diagnostics/state-bundles/{filename}")
     def download_state_bundle(filename: str) -> FileResponse:

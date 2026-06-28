@@ -8,7 +8,7 @@ from plan_commission_workbench import statuses
 from plan_commission_workbench.application_pipeline import ApplicationPipeline
 from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.docling_adapter import DoclingTextExtractor, DoclingTextResult
-from plan_commission_workbench.exceptions import DoclingExtractionError
+from plan_commission_workbench.exceptions import DoclingExtractionError, DownloadError
 from plan_commission_workbench.llm import LLMJsonClient
 from plan_commission_workbench.models import AttachmentRecord, AgendaClassification, AgendaSegment, DownloadedFile, EventRecord, RunRequest
 from plan_commission_workbench.runtime import WorkbenchRuntime
@@ -97,6 +97,23 @@ class DuplicateAttachmentLegistar(FakeLegistar):
             source_url=APP_URL,
             name="Land Use Application.pdf",
         )
+
+
+class BrokenApplicationLinkLegistar(FakeLegistar):
+    """Purpose: simulate a Legistar metadata row whose file endpoint is dead."""
+
+    def __init__(self, *, status_code: int) -> None:
+        super().__init__(include_second_event=True)
+        self.status_code = status_code
+
+    def download_file(self, url: str, destination: Path) -> DownloadedFile:
+        self.downloads += 1
+        if "/Matters/96005/" in url:
+            raise DownloadError(f"Failed to download {url}: HTTP {self.status_code}", status_code=self.status_code, url=url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = url.encode("utf-8")
+        destination.write_bytes(payload)
+        return DownloadedFile(destination, hashlib.sha256(payload).hexdigest())
 
 
 class FakeDocling(DoclingTextExtractor):
@@ -389,6 +406,45 @@ def test_application_queue_skips_reused_attachment_across_agenda_items(tmp_path)
     assert docling.calls == 1
     assert "application_skip_source_reused" in stages
     assert len(workbench.store.list_application_extractions()) == 1
+
+
+def test_application_download_404_is_logged_unavailable_and_run_continues(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = BrokenApplicationLinkLegistar(status_code=404)
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+
+    first = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    second = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert first["status"] == statuses.COMPLETED
+    assert second["status"] == statuses.COMPLETED
+    assert legistar.downloads == 4
+    assert docling.calls == 3
+    events = workbench.store.list_run_events(1) + workbench.store.list_run_events(2)
+    stages = [event["stage"] for event in events]
+    assert statuses.APPLICATION_UNAVAILABLE in stages
+    assert "application_skip_unavailable_source" in stages
+    assert len(workbench.store.list_application_extractions()) == 1
+    with workbench.store.transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT processing_status
+            FROM source_items
+            WHERE source_kind = 'application' AND attachment_id = '171817'
+            """
+        ).fetchone()
+    assert row["processing_status"] == statuses.APPLICATION_UNAVAILABLE
+
+
+def test_application_download_500_still_fails_run(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = BrokenApplicationLinkLegistar(status_code=500)
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert result["status"] == statuses.FAILED_APPLICATION_DOWNLOAD
+    assert "HTTP 500" in result["last_error"]
 
 
 def test_docling_failure_stops_run_and_cleans_temp_files(tmp_path) -> None:

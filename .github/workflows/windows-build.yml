@@ -12,6 +12,13 @@ jobs:
     name: Build Windows executable
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      PCW_APPINSTALLER_URI: ${{ vars.PCW_APPINSTALLER_URI }}
+      PCW_MSIX_PACKAGE_URI: ${{ vars.PCW_MSIX_PACKAGE_URI }}
+      PCW_MSIX_PUBLISHER: ${{ vars.PCW_MSIX_PUBLISHER }}
+      PCW_REQUIRE_TRUSTED_SIGNATURE: ${{ vars.PCW_REQUIRE_TRUSTED_SIGNATURE }}
+      PCW_SIGNING_CERTIFICATE_BASE64: ${{ secrets.PCW_SIGNING_CERTIFICATE_BASE64 }}
+      PCW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.PCW_SIGNING_CERTIFICATE_PASSWORD }}
 
     steps:
       - name: Check out repository
@@ -23,13 +30,39 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Restore MSIX signing certificate
+        if: ${{ env.PCW_SIGNING_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP "pcw-msix-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:PCW_SIGNING_CERTIFICATE_BASE64))
+          "PCW_SIGNING_CERTIFICATE_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build launcher
         shell: pwsh
-        run: .\scripts\build_windows.ps1
+        run: |
+          $arguments = @()
+          if ([string]::IsNullOrWhiteSpace($env:PCW_SIGNING_CERTIFICATE_BASE64)) {
+            $arguments += "-CreateTestCertificate"
+          }
+          .\scripts\build_windows.ps1 @arguments
+
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          $arguments = @()
+          if ($env:PCW_REQUIRE_TRUSTED_SIGNATURE -eq "true") {
+            $arguments += "-RequireTrustedSignature"
+          }
+          .\scripts\verify_windows_artifacts.ps1 @arguments
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: PlanCommissionWorkbench-windows
-          path: artifacts/PlanCommissionWorkbench-windows.zip
+          path: |
+            artifacts/PlanCommissionWorkbench-windows.zip
+            artifacts/PlanCommissionWorkbench.msix
+            artifacts/PlanCommissionWorkbench.appinstaller
+            artifacts/PlanCommissionWorkbench-test.cer
           if-no-files-found: error

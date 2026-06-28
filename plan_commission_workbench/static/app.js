@@ -43,6 +43,7 @@ function qualityIssues(row) {
 
 function statusClass(status, row = null) {
   if (status === "application_extracted" && qualityIssues(row).length) return "warn";
+  if (status === "application_unavailable") return "warn";
   if (["completed", "accepted", "application_extracted", "agenda_hit"].includes(status)) return "ok";
   if (String(status || "").startsWith("failed") || ["rejected", "not_target_project"].includes(status)) return "fail";
   return "warn";
@@ -75,6 +76,87 @@ async function promptForOpenAiKey() {
     window.alert(`OpenAI API key is active for this session, but it could not be saved locally.\n${result.credential_error}`);
   }
   await loadHealth();
+}
+
+async function loadDiagnosticEmailSettings() {
+  const form = $("#diagnostic-email-form");
+  const status = $("#diagnostic-email-status");
+  if (!form) return;
+  const settings = await getJson("/settings/diagnostic-email");
+  form.elements.recipient.value = settings.recipient || "";
+  form.elements.smtp_host.value = settings.smtp_host || "";
+  form.elements.smtp_port.value = settings.smtp_port || 587;
+  form.elements.smtp_username.value = settings.smtp_username || "";
+  form.elements.smtp_password.value = "";
+  form.elements.sender.value = settings.sender || "";
+  form.elements.enabled.checked = Boolean(settings.enabled);
+  form.elements.use_ssl.checked = Boolean(settings.use_ssl);
+  form.elements.use_starttls.checked = Boolean(settings.use_starttls);
+  if (status) {
+    status.textContent = settings.configured ? "Email ready" : settings.credential_saved ? "Email settings incomplete" : "Email not configured";
+  }
+}
+
+function diagnosticEmailPayload(form) {
+  return {
+    recipient: form.elements.recipient.value.trim(),
+    smtp_host: form.elements.smtp_host.value.trim(),
+    smtp_port: Number(form.elements.smtp_port.value || 587),
+    smtp_username: form.elements.smtp_username.value.trim(),
+    smtp_password: form.elements.smtp_password.value,
+    sender: form.elements.sender.value.trim(),
+    enabled: form.elements.enabled.checked,
+    use_ssl: form.elements.use_ssl.checked,
+    use_starttls: form.elements.use_starttls.checked,
+  };
+}
+
+async function saveDiagnosticEmailSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const result = await getJson("/settings/diagnostic-email", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(diagnosticEmailPayload(form)),
+  });
+  if (result.credential_error) {
+    window.alert(`Email settings saved, but the credential could not be saved.\n${result.credential_error}`);
+  }
+  await loadDiagnosticEmailSettings();
+}
+
+async function testDiagnosticEmail() {
+  await getJson("/settings/diagnostic-email/test", {method: "POST"});
+  window.alert("Diagnostic test email sent.");
+}
+
+async function sendDiagnosticEmail() {
+  const includeStateBundle = window.confirm("Attach a full state bundle? This may include contact data.");
+  await getJson("/diagnostics/email", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({run_id: selectedRunId ? Number(selectedRunId) : null, include_state_bundle: includeStateBundle}),
+  });
+  window.alert("Diagnostic email sent.");
+}
+
+async function clearOpenAiKey() {
+  if (!window.confirm("Clear the saved OpenAI API key from this machine?")) return;
+  await getJson("/settings/openai-api-key", {method: "DELETE"});
+  await loadHealth();
+}
+
+async function clearEmailSecret() {
+  if (!window.confirm("Clear the saved diagnostic email credential from this machine?")) return;
+  await getJson("/settings/diagnostic-email/credential", {method: "DELETE"});
+  await loadDiagnosticEmailSettings();
+}
+
+async function clearAllSecrets() {
+  if (!window.confirm("Clear all stored workbench secrets from this machine?")) return;
+  await getJson("/settings/secrets", {method: "DELETE"});
+  await loadHealth();
+  await loadDiagnosticEmailSettings();
 }
 
 async function loadRuns() {
@@ -143,8 +225,15 @@ function renderLogRefreshError(list, error) {
 
 function setupRunPage() {
   loadHealth({prompt: true}).catch((error) => alert(error.message));
+  loadDiagnosticEmailSettings().catch((error) => alert(error.message));
   loadRuns().catch(console.error);
   $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
+  $("#diagnostic-email-form")?.addEventListener("submit", (event) => saveDiagnosticEmailSettings(event).catch((error) => alert(error.message)));
+  $("#test-diagnostic-email")?.addEventListener("click", () => testDiagnosticEmail().catch((error) => alert(error.message)));
+  $("#send-diagnostic-email")?.addEventListener("click", () => sendDiagnosticEmail().catch((error) => alert(error.message)));
+  $("#clear-openai-key")?.addEventListener("click", () => clearOpenAiKey().catch((error) => alert(error.message)));
+  $("#clear-email-secret")?.addEventListener("click", () => clearEmailSecret().catch((error) => alert(error.message)));
+  $("#clear-all-secrets")?.addEventListener("click", () => clearAllSecrets().catch((error) => alert(error.message)));
   $("#refresh-runs")?.addEventListener("click", () => loadRuns().catch(console.error));
   $("#download-state-bundle")?.addEventListener("click", () => downloadStateBundle().catch((error) => alert(error.message)));
   $("#run-form")?.addEventListener("submit", async (event) => {

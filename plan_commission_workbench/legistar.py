@@ -159,8 +159,11 @@ class LegistarClient:
                         byte_count += len(chunk)
                         digest.update(chunk)
                         fh.write(chunk)
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            raise DownloadError(f"Failed to download {url}: {exc}", status_code=status_code, url=url) from exc
         except Exception as exc:
-            raise DownloadError(f"Failed to download {url}: {exc}") from exc
+            raise DownloadError(f"Failed to download {url}: {exc}", url=url) from exc
         try:
             first_bytes = self._validate_download(url, destination, byte_count, content_type, content_length)
         except DownloadError:
