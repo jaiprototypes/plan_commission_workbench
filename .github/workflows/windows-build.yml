@@ -41,20 +41,20 @@ jobs:
       - name: Build launcher
         shell: pwsh
         run: |
-          $arguments = @()
           if ([string]::IsNullOrWhiteSpace($env:PCW_SIGNING_CERTIFICATE_BASE64)) {
-            $arguments += "-CreateTestCertificate"
+            .\scripts\build_windows.ps1 -CreateTestCertificate
+          } else {
+            .\scripts\build_windows.ps1
           }
-          .\scripts\build_windows.ps1 @arguments
 
       - name: Verify Windows artifacts
         shell: pwsh
         run: |
-          $arguments = @()
           if ($env:PCW_REQUIRE_TRUSTED_SIGNATURE -eq "true") {
-            $arguments += "-RequireTrustedSignature"
+            .\scripts\verify_windows_artifacts.ps1 -RequireTrustedSignature
+          } else {
+            .\scripts\verify_windows_artifacts.ps1
           }
-          .\scripts\verify_windows_artifacts.ps1 @arguments
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4

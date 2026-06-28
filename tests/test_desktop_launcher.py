@@ -116,7 +116,9 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "artifacts/PlanCommissionWorkbench.msix" in workflow
     assert "artifacts/PlanCommissionWorkbench.appinstaller" in workflow
     assert "verify_windows_artifacts.ps1" in workflow
-    assert "-CreateTestCertificate" in workflow
+    assert ".\\scripts\\build_windows.ps1 -CreateTestCertificate" in workflow
+    assert ".\\scripts\\verify_windows_artifacts.ps1 -RequireTrustedSignature" in workflow
+    assert '$arguments += "-CreateTestCertificate"' not in workflow
     assert "PCW_REQUIRE_TRUSTED_SIGNATURE" in workflow
     assert "unpack /p" in verifier
     assert "Get-AuthenticodeSignature" in verifier
