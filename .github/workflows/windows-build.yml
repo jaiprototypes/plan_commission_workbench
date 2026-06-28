@@ -7,6 +7,9 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     name: Build Windows executable
@@ -14,9 +17,12 @@ jobs:
     timeout-minutes: 60
     env:
       PCW_APPINSTALLER_URI: ${{ vars.PCW_APPINSTALLER_URI }}
+      PCW_MSIX_VERSION: ${{ vars.PCW_MSIX_VERSION }}
+      PCW_MSIX_VERSION_PREFIX: ${{ vars.PCW_MSIX_VERSION_PREFIX }}
       PCW_MSIX_PACKAGE_URI: ${{ vars.PCW_MSIX_PACKAGE_URI }}
       PCW_MSIX_PUBLISHER: ${{ vars.PCW_MSIX_PUBLISHER }}
       PCW_REQUIRE_TRUSTED_SIGNATURE: ${{ vars.PCW_REQUIRE_TRUSTED_SIGNATURE }}
+      PCW_UPDATE_RELEASE_TAG: ${{ vars.PCW_UPDATE_RELEASE_TAG }}
       PCW_SIGNING_CERTIFICATE_BASE64: ${{ secrets.PCW_SIGNING_CERTIFICATE_BASE64 }}
       PCW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.PCW_SIGNING_CERTIFICATE_PASSWORD }}
 
@@ -30,12 +36,72 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Configure App Installer feed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function ConvertTo-MsixVersion {
+            param([string]$InputVersion)
+
+            $parts = @($InputVersion.Split("."))
+            if ($parts.Count -gt 4) {
+              throw "MSIX versions must use at most four numeric parts: $InputVersion"
+            }
+            foreach ($part in $parts) {
+              if ($part -notmatch '^\d+$') {
+                throw "MSIX version parts must be numeric: $InputVersion"
+              }
+              if ([int]$part -gt 65535) {
+                throw "MSIX version parts must be 65535 or lower: $InputVersion"
+              }
+            }
+            while ($parts.Count -lt 4) {
+              $parts += "0"
+            }
+            return $parts -join "."
+          }
+
+          $releaseTag = if ([string]::IsNullOrWhiteSpace($env:PCW_UPDATE_RELEASE_TAG)) { "pcw-windows-stable" } else { $env:PCW_UPDATE_RELEASE_TAG }
+          $appInstallerUri = if ([string]::IsNullOrWhiteSpace($env:PCW_APPINSTALLER_URI)) {
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$releaseTag/PlanCommissionWorkbench.appinstaller"
+          } else {
+            $env:PCW_APPINSTALLER_URI
+          }
+          $packageUri = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_PACKAGE_URI)) {
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$releaseTag/PlanCommissionWorkbench.msix"
+          } else {
+            $env:PCW_MSIX_PACKAGE_URI
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION)) {
+            $versionPrefix = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION_PREFIX)) { "0.1" } else { $env:PCW_MSIX_VERSION_PREFIX }
+            if ($versionPrefix -notmatch '^\d+\.\d+$') {
+              throw "PCW_MSIX_VERSION_PREFIX must use two numeric parts, for example 0.1"
+            }
+            $runNumber = [int]$env:GITHUB_RUN_NUMBER
+            if ($runNumber -gt 65535) {
+              throw "GitHub run number $runNumber is too high for an MSIX version part"
+            }
+            $env:PCW_MSIX_VERSION = "$versionPrefix.$runNumber.0"
+          }
+          $env:PCW_MSIX_VERSION = ConvertTo-MsixVersion $env:PCW_MSIX_VERSION
+          "PCW_UPDATE_RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_APPINSTALLER_URI=$appInstallerUri" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_MSIX_PACKAGE_URI=$packageUri" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_MSIX_VERSION=$env:PCW_MSIX_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_VERSION_RELEASE_TAG=pcw-windows-v$env:PCW_MSIX_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Configured App Installer feed: $appInstallerUri"
+          Write-Host "Configured MSIX package URI: $packageUri"
+          Write-Host "Configured MSIX version: $env:PCW_MSIX_VERSION"
+
       - name: Restore MSIX signing certificate
         if: ${{ env.PCW_SIGNING_CERTIFICATE_BASE64 != '' }}
         shell: pwsh
         run: |
           $certPath = Join-Path $env:RUNNER_TEMP "pcw-msix-signing.pfx"
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:PCW_SIGNING_CERTIFICATE_BASE64))
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, $env:PCW_SIGNING_CERTIFICATE_PASSWORD)
+          [IO.File]::WriteAllBytes("artifacts\PlanCommissionWorkbench-signing.cer", $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           "PCW_SIGNING_CERTIFICATE_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build launcher
@@ -65,4 +131,47 @@ jobs:
             artifacts/PlanCommissionWorkbench.msix
             artifacts/PlanCommissionWorkbench.appinstaller
             artifacts/PlanCommissionWorkbench-test.cer
+            artifacts/PlanCommissionWorkbench-signing.cer
           if-no-files-found: error
+
+      - name: Publish App Installer update feed
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.PCW_SIGNING_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = @(
+            "artifacts\PlanCommissionWorkbench-windows.zip",
+            "artifacts\PlanCommissionWorkbench.msix",
+            "artifacts\PlanCommissionWorkbench.appinstaller"
+          )
+          foreach ($certPath in @("artifacts\PlanCommissionWorkbench-test.cer", "artifacts\PlanCommissionWorkbench-signing.cer")) {
+            if (Test-Path $certPath) {
+              $files += $certPath
+            }
+          }
+          $versionNotes = "Windows desktop build $env:PCW_MSIX_VERSION from $env:GITHUB_SHA. Keep this release for rollback."
+          gh release view $env:PCW_VERSION_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:PCW_VERSION_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title "Plan Commission Workbench $env:PCW_MSIX_VERSION" --notes $versionNotes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create versioned release $env:PCW_VERSION_RELEASE_TAG" }
+          }
+          gh release upload $env:PCW_VERSION_RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload versioned release assets" }
+
+          $stableNotes = "Stable App Installer feed. Windows checks PlanCommissionWorkbench.appinstaller here for launch-time updates. Roll back by publishing assets from a versioned pcw-windows-v* release."
+          gh release view $env:PCW_UPDATE_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:PCW_UPDATE_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title "Plan Commission Workbench stable Windows feed" --notes $stableNotes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create stable release $env:PCW_UPDATE_RELEASE_TAG" }
+          }
+          gh release upload $env:PCW_UPDATE_RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload stable update feed assets" }
+          Write-Host "Published $env:PCW_MSIX_VERSION to $env:PCW_UPDATE_RELEASE_TAG"
+
+      - name: Explain skipped update feed publish
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.PCW_SIGNING_CERTIFICATE_BASE64 == '' }}
+        shell: pwsh
+        run: |
+          Write-Warning "Skipped App Installer feed publish because PCW_SIGNING_CERTIFICATE_BASE64 is not configured. Artifact builds still work, but auto-updates need one persistent signing certificate."

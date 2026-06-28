@@ -140,8 +140,8 @@ Preferred deployment target:
 
 - Package format: MSIX or MSIX bundle.
 - Update controller: App Installer `.appinstaller` file.
-- Hosting: GitHub Releases, private HTTPS storage, or another stable HTTPS
-  endpoint controlled by GECG.
+- Hosting: GitHub Releases stable feed, private HTTPS storage, or another stable
+  HTTPS endpoint controlled by GECG.
 - Install scope: current user unless a machine-wide install becomes necessary.
 - Runtime data: keep using `%LOCALAPPDATA%\PlanCommissionWorkbench\data`.
 - Secrets: keep using Windows Credential Manager for the OpenAI key and any
@@ -156,6 +156,10 @@ keeps the fallback zip and adds:
 - GitHub Actions artifact verification that unpacks the MSIX, compares package
   identity against the `.appinstaller`, checks update settings, and verifies that
   the MSIX is signed
+- GitHub Releases stable update feed at `pcw-windows-stable` when persistent
+  signing secrets are configured
+- retained versioned release tags in the form `pcw-windows-v<MSIX_VERSION>` for
+  rollback
 
 Implemented steps:
 
@@ -171,6 +175,8 @@ Implemented steps:
 6. Update the README with first-install and update behavior.
 7. Keep a manual zip artifact temporarily as a fallback until the MSIX path has
    been tested on the production machine.
+8. Add a rollback workflow that republishes a retained versioned release to the
+   stable App Installer feed.
 
 Update behavior expectations:
 
@@ -180,6 +186,15 @@ Update behavior expectations:
 - The local SQLite database, logs, diagnostics folder, and Credential Manager
   secrets remain intact.
 - Update failure should not corrupt the existing app data directory.
+- The stable feed must not be published from a newly generated temporary
+  certificate. GitHub Actions must use the persistent PFX secret so certificate
+  trust remains a one-time target-machine action.
+- The stable feed release tag is `pcw-windows-stable` unless explicitly
+  overridden. Windows should never be pointed at per-run Actions artifacts for
+  update checks.
+- Production installs must start from the stable `.appinstaller` file. Direct
+  `.msix` installs are useful for testing, but they do not subscribe Windows to
+  the App Installer update feed.
 
 Validation:
 
@@ -190,6 +205,8 @@ Validation:
 4. Launch the installed app and confirm Windows detects and applies the update.
 5. Confirm the existing database, OpenAI key, logs, and exports remain available.
 6. Confirm the packaged app can still spawn run workers and Docling workers.
+7. Run the rollback workflow with version `A`, launch the app again, and confirm
+   Windows restores the retained package without deleting local workbench data.
 
 References:
 
@@ -407,8 +424,13 @@ Diagnostics and support communication:
 
 Rollback and recovery:
 
-- A bad update may need a rollback path. Keep the previous MSIX package available
-  and document how to reinstall it without touching `%LOCALAPPDATA%` data.
+- A bad update may need a rollback path. Keep every signed production MSIX
+  available as `pcw-windows-v<MSIX_VERSION>`, and use the rollback workflow to
+  republish the previous package to `pcw-windows-stable`.
+- Keep `ForceUpdateFromAnyVersion=true` in the App Installer file so Windows can
+  restore a previous package version from the stable feed.
+- If a bad build cannot launch, rerun/open the stable `.appinstaller` file after
+  the rollback workflow publishes the previous version to force package repair.
 - Database migrations must be forward-safe and backed up before schema changes.
   A failed migration should preserve the pre-migration DB and surface the backup
   path in diagnostics.

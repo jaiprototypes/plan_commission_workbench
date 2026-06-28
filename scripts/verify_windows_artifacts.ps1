@@ -227,6 +227,11 @@ $onLaunch = Select-XmlNode `
     -NamespacePrefix "ai" `
     -NamespaceUri "http://schemas.microsoft.com/appx/appinstaller/2021" `
     -XPath "/ai:AppInstaller/ai:UpdateSettings/ai:OnLaunch"
+$forceUpdate = Select-XmlNode `
+    -Document $appInstaller `
+    -NamespacePrefix "ai" `
+    -NamespaceUri "http://schemas.microsoft.com/appx/appinstaller/2021" `
+    -XPath "/ai:AppInstaller/ai:UpdateSettings/ai:ForceUpdateFromAnyVersion"
 
 $appInstallerRoot = $appInstaller.DocumentElement
 Assert-Equal "AppInstaller version" $resolvedVersion ($appInstallerRoot.GetAttribute("Version"))
@@ -248,6 +253,9 @@ if (-not [string]::IsNullOrWhiteSpace($expectedPackageUri)) {
 
 if (-not $onLaunch.GetAttribute("HoursBetweenUpdateChecks")) {
     throw "AppInstaller update settings must include OnLaunch HoursBetweenUpdateChecks."
+}
+if ($forceUpdate.InnerText -ne "true") {
+    throw "AppInstaller rollback support requires ForceUpdateFromAnyVersion=true."
 }
 
 Write-Host "Verified Windows artifacts in $resolvedArtifactDir"

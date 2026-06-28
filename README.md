@@ -129,6 +129,19 @@ The zip remains available as a fallback. For production installs, publish the
 `.appinstaller` file. Windows App Installer will check that same App Installer
 URI on launch and apply newer MSIX versions when they are published.
 
+The GitHub Actions workflow publishes the update feed to GitHub Releases when a
+persistent signing certificate secret is configured. The stable feed assets live
+on release tag `pcw-windows-stable` by default:
+
+- `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.appinstaller`
+- `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.msix`
+
+Install production machines from the stable `.appinstaller` URL, not from a
+per-run GitHub Actions artifact. Actions artifacts are useful verification
+outputs, but Windows cannot poll them as an update feed. A direct `.msix`
+install also bypasses the App Installer update subscription; use it only for
+manual testing or emergency package repair.
+
 Useful MSIX build settings:
 
 ```powershell
@@ -147,6 +160,28 @@ only, run `.\scripts\build_windows.ps1 -CreateTestCertificate`; it exports
 `artifacts\PlanCommissionWorkbench-test.cer`, which must be trusted on the target
 machine before installing.
 
+For the production update feed, do not use `-CreateTestCertificate`. Generate a
+persistent signing PFX once on Windows and store it in GitHub Secrets:
+
+```powershell
+.\scripts\create_windows_signing_secret.ps1 -Publisher "CN=GECG" -Password "<pfx-password>"
+gh secret set PCW_SIGNING_CERTIFICATE_BASE64 --body (Get-Content -Raw "artifacts\signing\PlanCommissionWorkbench-signing.pfx.base64.txt")
+gh secret set PCW_SIGNING_CERTIFICATE_PASSWORD --body "<pfx-password>"
+gh variable set PCW_MSIX_PUBLISHER --body "CN=GECG"
+```
+
+Trust `artifacts\signing\PlanCommissionWorkbench-signing.cer` once on the
+production PC:
+
+```powershell
+certutil -f -addstore TrustedPeople "C:\path\PlanCommissionWorkbench-signing.cer"
+certutil -f -addstore Root "C:\path\PlanCommissionWorkbench-signing.cer"
+```
+
+The currently trusted one-off `PlanCommissionWorkbench-test.cer` from a previous
+Actions artifact cannot sign future builds because it does not include the
+private key. A durable PFX secret is required for hands-off updates.
+
 Before testing on a production PC, use the GitHub Actions build as the first
 gate. The workflow builds the zip/MSIX/App Installer artifacts, unpacks the MSIX,
 checks that `AppxManifest.xml` and the `.appinstaller` identities match, confirms
@@ -164,6 +199,17 @@ dispatch. Set repository variables `PCW_APPINSTALLER_URI`,
 `PCW_MSIX_PACKAGE_URI`, and `PCW_MSIX_PUBLISHER`, plus secrets
 `PCW_SIGNING_CERTIFICATE_BASE64` and `PCW_SIGNING_CERTIFICATE_PASSWORD`, for a
 signed CI build.
+
+Each successful signed `main` build also publishes a retained versioned release
+tagged `pcw-windows-v<MSIX_VERSION>`. If a bad update ships, run the
+`Roll Back Windows Desktop Update Feed` workflow and provide the previous MSIX
+version. The workflow republishes that retained package to `pcw-windows-stable`;
+the `.appinstaller` file keeps `ForceUpdateFromAnyVersion=true` so Windows can
+restore the previous package without touching `%LOCALAPPDATA%` data, logs,
+exports, diagnostics, or Credential Manager secrets. If the bad app cannot
+launch far enough to trigger its normal on-launch check, open the stable
+`.appinstaller` file again after the rollback workflow finishes to force Windows
+to repair the installed package from the stable feed.
 
 ## Tests
 

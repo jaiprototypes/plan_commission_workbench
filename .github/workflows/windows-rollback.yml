@@ -1,0 +1,70 @@
+name: Roll Back Windows Desktop Update Feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "MSIX version to restore, for example 0.1.123.0"
+        required: true
+        type: string
+      stable_tag:
+        description: "Stable update-feed release tag"
+        required: false
+        default: "pcw-windows-stable"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  rollback:
+    name: Restore previous Windows MSIX feed
+    runs-on: windows-latest
+    steps:
+      - name: Download retained release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROLLBACK_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:ROLLBACK_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Rollback version must use four numeric parts, for example 0.1.123.0"
+          }
+          $versionTag = "pcw-windows-v$env:ROLLBACK_VERSION"
+          New-Item -ItemType Directory -Force -Path rollback-assets | Out-Null
+          gh release download $versionTag --repo $env:GITHUB_REPOSITORY --dir rollback-assets
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download rollback assets from $versionTag"
+          }
+          if (-not (Test-Path "rollback-assets\PlanCommissionWorkbench.msix")) {
+            throw "Rollback release $versionTag does not contain PlanCommissionWorkbench.msix"
+          }
+          if (-not (Test-Path "rollback-assets\PlanCommissionWorkbench.appinstaller")) {
+            throw "Rollback release $versionTag does not contain PlanCommissionWorkbench.appinstaller"
+          }
+
+      - name: Restore stable feed assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROLLBACK_VERSION: ${{ inputs.version }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stableTag = if ([string]::IsNullOrWhiteSpace($env:STABLE_TAG)) { "pcw-windows-stable" } else { $env:STABLE_TAG }
+          $files = Get-ChildItem -Path rollback-assets -File | ForEach-Object { $_.FullName }
+          if (-not $files) {
+            throw "No rollback assets were downloaded"
+          }
+          $notes = "Stable App Installer feed rolled back to $env:ROLLBACK_VERSION by workflow run $env:GITHUB_RUN_ID. ForceUpdateFromAnyVersion in the App Installer file allows Windows to restore this previous package."
+          gh release view $stableTag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $stableTag --repo $env:GITHUB_REPOSITORY --title "Plan Commission Workbench stable Windows feed" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create stable release $stableTag" }
+          }
+          gh release edit $stableTag --repo $env:GITHUB_REPOSITORY --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Could not update stable release notes" }
+          gh release upload $stableTag @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload rollback assets to $stableTag" }
+          Write-Host "Stable Windows update feed now points at $env:ROLLBACK_VERSION"

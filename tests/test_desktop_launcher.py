@@ -109,6 +109,8 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     verifier = (ROOT / "scripts" / "verify_windows_artifacts.ps1").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    rollback_workflow = (ROOT / ".github" / "workflows" / "windows-rollback.yml").read_text(encoding="utf-8")
+    signing_script = (ROOT / "scripts" / "create_windows_signing_secret.ps1").read_text(encoding="utf-8")
 
     assert "MakeAppx.exe" in script
     assert "SignTool.exe" in script
@@ -152,11 +154,28 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert ".\\scripts\\verify_windows_artifacts.ps1 -RequireTrustedSignature" in workflow
     assert '$arguments += "-CreateTestCertificate"' not in workflow
     assert "PCW_REQUIRE_TRUSTED_SIGNATURE" in workflow
+    assert "Configure App Installer feed" in workflow
+    assert "function ConvertTo-MsixVersion" in workflow
+    assert "pcw-windows-stable" in workflow
+    assert "PCW_VERSION_RELEASE_TAG=pcw-windows-v$env:PCW_MSIX_VERSION" in workflow
+    assert "Publish App Installer update feed" in workflow
+    assert "gh release upload $env:PCW_UPDATE_RELEASE_TAG @files" in workflow
+    assert "PCW_SIGNING_CERTIFICATE_BASE64 != ''" in workflow
+    assert "Skipped App Installer feed publish" in workflow
     assert "unpack /p" in verifier
     assert "Get-AuthenticodeSignature" in verifier
     assert "RequireTrustedSignature" in verifier
     assert "Configured AppInstaller URI" in verifier
     assert "Configured MSIX package URI" in verifier
+    assert "ForceUpdateFromAnyVersion" in verifier
+    assert "rollback support requires ForceUpdateFromAnyVersion=true" in verifier
+    assert "Roll Back Windows Desktop Update Feed" in rollback_workflow
+    assert "pcw-windows-v$env:ROLLBACK_VERSION" in rollback_workflow
+    assert "gh release download $versionTag" in rollback_workflow
+    assert "gh release upload $stableTag @files" in rollback_workflow
+    assert "New-SelfSignedCertificate" in signing_script
+    assert "PCW_SIGNING_CERTIFICATE_BASE64" in signing_script
+    assert "certutil -f -addstore TrustedPeople" in signing_script
 
 
 def test_msix_manifest_template_declares_packaged_desktop_app() -> None:
