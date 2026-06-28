@@ -161,7 +161,8 @@ only, run `.\scripts\build_windows.ps1 -CreateTestCertificate`; it exports
 machine before installing.
 
 For the production update feed, do not use `-CreateTestCertificate`. Generate a
-persistent signing PFX once on Windows and store it in GitHub Secrets:
+persistent signing PFX once on Windows and store it in GitHub Secrets. The helper
+uses the MSIX-required Code Signing EKU and Basic Constraints extensions:
 
 ```powershell
 .\scripts\create_windows_signing_secret.ps1 -Publisher "CN=GECG" -Password "<pfx-password>"
@@ -170,12 +171,16 @@ gh secret set PCW_SIGNING_CERTIFICATE_PASSWORD --body "<pfx-password>"
 gh variable set PCW_MSIX_PUBLISHER --body "CN=GECG"
 ```
 
-Trust `artifacts\signing\PlanCommissionWorkbench-signing.cer` once on the
-production PC:
+The stable release includes `Install-PlanCommissionWorkbench.cmd` and
+`Install-PlanCommissionWorkbench.ps1`. Run the `.cmd` file as the production
+first-install path when possible; it prompts for UAC, imports the stable
+certificate into Local Machine Trusted People, then installs from the stable
+`.appinstaller` feed.
+
+Manual trust remains available if the script is blocked by local policy:
 
 ```powershell
-certutil -f -addstore TrustedPeople "C:\path\PlanCommissionWorkbench-signing.cer"
-certutil -f -addstore Root "C:\path\PlanCommissionWorkbench-signing.cer"
+Import-Certificate -FilePath "C:\path\PlanCommissionWorkbench-signing.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 ```
 
 The currently trusted one-off `PlanCommissionWorkbench-test.cer` from a previous

@@ -111,6 +111,12 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
     rollback_workflow = (ROOT / ".github" / "workflows" / "windows-rollback.yml").read_text(encoding="utf-8")
     signing_script = (ROOT / "scripts" / "create_windows_signing_secret.ps1").read_text(encoding="utf-8")
+    installer_script = (ROOT / "packaging" / "windows" / "Install-PlanCommissionWorkbench.ps1").read_text(
+        encoding="utf-8"
+    )
+    installer_cmd = (ROOT / "packaging" / "windows" / "Install-PlanCommissionWorkbench.cmd").read_text(
+        encoding="utf-8"
+    )
 
     assert "MakeAppx.exe" in script
     assert "SignTool.exe" in script
@@ -175,7 +181,16 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "gh release upload $stableTag @files" in rollback_workflow
     assert "New-SelfSignedCertificate" in signing_script
     assert "PCW_SIGNING_CERTIFICATE_BASE64" in signing_script
-    assert "certutil -f -addstore TrustedPeople" in signing_script
+    assert "2.5.29.19={text}" in signing_script
+    assert "Cert:\\LocalMachine\\TrustedPeople" in signing_script
+    assert "Install-PlanCommissionWorkbench.ps1" in workflow
+    assert "Install-PlanCommissionWorkbench.cmd" in workflow
+    assert "Start-Process" in installer_script
+    assert "Verb RunAs" in installer_script
+    assert "PlanCommissionWorkbench-signing.cer" in installer_script
+    assert "Cert:\\LocalMachine\\TrustedPeople" in installer_script
+    assert "Add-AppxPackage -AppInstallerFile" in installer_script
+    assert "ExecutionPolicy Bypass" in installer_cmd
 
 
 def test_msix_manifest_template_declares_packaged_desktop_app() -> None:

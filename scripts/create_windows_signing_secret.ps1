@@ -22,11 +22,12 @@ if (-not (Get-Command New-SelfSignedCertificate -ErrorAction SilentlyContinue)) 
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 $certificate = New-SelfSignedCertificate `
-    -Type CodeSigningCert `
+    -Type Custom `
     -Subject $Publisher `
     -CertStoreLocation "Cert:\CurrentUser\My" `
     -KeyExportPolicy Exportable `
     -KeyUsage DigitalSignature `
+    -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}") `
     -FriendlyName "Plan Commission Workbench persistent MSIX signing certificate"
 
 $pfxPath = Join-Path $resolvedOutputDir "PlanCommissionWorkbench-signing.pfx"
@@ -44,8 +45,9 @@ Write-Host "  Private PFX: $pfxPath"
 Write-Host "  GitHub secret payload: $base64Path"
 Write-Host ""
 Write-Host "Trust the public certificate once on the production PC:"
-Write-Host "  certutil -f -addstore TrustedPeople `"$cerPath`""
-Write-Host "  certutil -f -addstore Root `"$cerPath`""
+Write-Host "  Import-Certificate -FilePath `"$cerPath`" -CertStoreLocation Cert:\LocalMachine\TrustedPeople"
+Write-Host ""
+Write-Host "Or download and run Install-PlanCommissionWorkbench.cmd from the stable release."
 Write-Host ""
 Write-Host "Configure GitHub with the PFX payload and password:"
 Write-Host "  gh secret set PCW_SIGNING_CERTIFICATE_BASE64 --body (Get-Content -Raw `"$base64Path`")"

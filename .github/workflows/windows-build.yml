@@ -132,6 +132,8 @@ jobs:
             artifacts/PlanCommissionWorkbench.appinstaller
             artifacts/PlanCommissionWorkbench-test.cer
             artifacts/PlanCommissionWorkbench-signing.cer
+            packaging/windows/Install-PlanCommissionWorkbench.ps1
+            packaging/windows/Install-PlanCommissionWorkbench.cmd
           if-no-files-found: error
 
       - name: Publish App Installer update feed
@@ -144,7 +146,9 @@ jobs:
           $files = @(
             "artifacts\PlanCommissionWorkbench-windows.zip",
             "artifacts\PlanCommissionWorkbench.msix",
-            "artifacts\PlanCommissionWorkbench.appinstaller"
+            "artifacts\PlanCommissionWorkbench.appinstaller",
+            "packaging\windows\Install-PlanCommissionWorkbench.ps1",
+            "packaging\windows\Install-PlanCommissionWorkbench.cmd"
           )
           foreach ($certPath in @("artifacts\PlanCommissionWorkbench-test.cer", "artifacts\PlanCommissionWorkbench-signing.cer")) {
             if (Test-Path $certPath) {
