@@ -336,7 +336,7 @@ class PlanCommissionWorkbench:
 
         return self.diagnostic_email.send_test_email()
 
-    def send_diagnostic_email(self, run_id: int | None, *, include_state_bundle: bool = False) -> dict[str, Any]:
+    def send_diagnostic_email(self, run_id: int | None, *, include_state_bundle: bool = True) -> dict[str, Any]:
         """Purpose: send a manual diagnostics email and optional state bundle."""
 
         bundle_path = None

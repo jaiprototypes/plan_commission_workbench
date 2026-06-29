@@ -27,6 +27,7 @@ class RunWatchdog:
         self.store = store
         self.interval_seconds = interval_seconds or self._env_int("PCW_WATCHDOG_INTERVAL_SECONDS", 30)
         self.stale_after_seconds = stale_after_seconds or self._env_int("PCW_RUN_STALE_SECONDS", 900)
+        self._last_audit_error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -50,9 +51,16 @@ class RunWatchdog:
         """Purpose: expose one watchdog pass for tests and startup recovery."""
 
         marked = self.store.mark_stale_running_runs(self.stale_after_seconds)
+        self._log_marked_runs(marked)
         for row in marked:
             self._stop_live_worker(row)
         return marked
+
+    def _log_marked_runs(self, marked: list[dict[str, Any]]) -> None:
+        """Purpose: report real watchdog actions without noisy healthy audits."""
+
+        for row in marked:
+            LOG.warning("Run watchdog marked run %s as %s: %s", row.get("run_id"), row.get("status"), row.get("message"))
 
     def _stop_live_worker(self, row: dict[str, Any]) -> None:
         """Purpose: stop stale child workers after the DB is marked failed."""
@@ -107,8 +115,19 @@ class RunWatchdog:
 
         try:
             self.audit_once()
-        except Exception:
-            LOG.exception("Run watchdog audit failed")
+        except Exception as exc:
+            self._log_audit_error(exc)
+        else:
+            self._last_audit_error = None
+
+    def _log_audit_error(self, exc: Exception) -> None:
+        """Purpose: keep repeated watchdog probe errors concise in production logs."""
+
+        key = f"{type(exc).__name__}: {exc}"
+        if key != self._last_audit_error:
+            LOG.warning("Run watchdog audit skipped: %s", key)
+        LOG.debug("Run watchdog audit failure details", exc_info=True)
+        self._last_audit_error = key
 
     def _env_int(self, name: str, default: int) -> int:
         """Purpose: parse watchdog timing from environment safely."""

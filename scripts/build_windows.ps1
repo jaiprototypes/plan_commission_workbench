@@ -207,10 +207,9 @@ function New-MsixLogo {
     $highlightRed = 204 + [int]([Math]::Floor($hash / 5) % 36)
     $highlightGreen = 224 + [int]([Math]::Floor($hash / 11) % 26)
     $highlightBlue = 18 + [int]([Math]::Floor($hash / 17) % 38)
-    $bitmap = New-Object System.Drawing.Bitmap($Size, $Size)
+    $bitmap = [System.Drawing.Bitmap]::new($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $background = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(31, 41, 55))
     $shadow = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(85, 0, 0, 0), [single]([Math]::Max(5, $Size * 0.17)))
     $main = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb($markRed, $markGreen, $markBlue), [single]([Math]::Max(5, $Size * 0.17)))
     $highlight = [System.Drawing.Pen]::new(
@@ -223,7 +222,7 @@ function New-MsixLogo {
             $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
             $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
         }
-        $graphics.FillRectangle($background, 0, 0, $Size, $Size)
+        $graphics.Clear([System.Drawing.Color]::Transparent)
         $center = [single]($Size / 2)
         $tiltDegrees = (($hash % 9) - 4) * 0.75
         $graphics.TranslateTransform($center, $center)
@@ -257,9 +256,23 @@ function New-MsixLogo {
         $highlight.Dispose()
         $main.Dispose()
         $shadow.Dispose()
-        $background.Dispose()
         $graphics.Dispose()
         $bitmap.Dispose()
+    }
+}
+
+function New-MsixLogoSet {
+    param(
+        [string]$AssetDir,
+        [string]$VariationKey
+    )
+
+    # Purpose: provide transparent plated and unplated assets for every Windows shortcut surface.
+    New-MsixLogo (Join-Path $AssetDir "Square44x44Logo.png") 44 $VariationKey
+    New-MsixLogo (Join-Path $AssetDir "Square150x150Logo.png") 150 $VariationKey
+    foreach ($targetSize in @(16, 24, 32, 48, 256)) {
+        New-MsixLogo (Join-Path $AssetDir ("Square44x44Logo.targetsize-{0}.png" -f $targetSize)) $targetSize $VariationKey
+        New-MsixLogo (Join-Path $AssetDir ("Square44x44Logo.targetsize-{0}_altform-unplated.png" -f $targetSize)) $targetSize $VariationKey
     }
 }
 
@@ -557,8 +570,7 @@ function Build-MsixArtifacts {
     Copy-Item -Path (Join-Path $AppDir "*") -Destination $MsixStagingDir -Recurse -Force
     $assetDir = Join-Path $MsixStagingDir "Assets"
     New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
-    New-MsixLogo (Join-Path $assetDir "Square44x44Logo.png") 44 $resolvedVersion
-    New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150 $resolvedVersion
+    New-MsixLogoSet $assetDir $resolvedVersion
     Optimize-MsixPayload $MsixStagingDir
     Test-StagedExecutable $MsixStagingDir
 

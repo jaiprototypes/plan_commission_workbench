@@ -82,9 +82,9 @@ jobs:
             $env:PCW_MSIX_PACKAGE_URI
           }
           if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION)) {
-            $versionPrefix = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION_PREFIX)) { "0.1" } else { $env:PCW_MSIX_VERSION_PREFIX }
+            $versionPrefix = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION_PREFIX)) { "1.0" } else { $env:PCW_MSIX_VERSION_PREFIX }
             if ($versionPrefix -notmatch '^\d+\.\d+$') {
-              throw "PCW_MSIX_VERSION_PREFIX must use two numeric parts, for example 0.1"
+              throw "PCW_MSIX_VERSION_PREFIX must use two numeric parts, for example 1.0"
             }
             $runNumber = [int]$env:GITHUB_RUN_NUMBER
             if ($runNumber -gt 65535) {

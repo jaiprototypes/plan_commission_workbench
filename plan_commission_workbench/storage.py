@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from . import statuses
 from .models import AgendaClassification, AgendaSegment, ApplicationExtraction, FieldEvidence
-from .quality import CONTACT_PREFIXES, application_quality_issues, contact_key, mailable_contact
+from .quality import CONTACT_PREFIXES, application_quality_issues, contact_key, mailable_contact, target_is_false
 from .segmentation import trim_non_item_tail
 
 
@@ -62,8 +62,17 @@ def _pid_alive(pid: int | None) -> bool | None:
 
     if not pid:
         return None
-    if os.name == "nt":
-        return _windows_pid_alive(int(pid))
+    try:
+        if os.name == "nt":
+            return _windows_pid_alive(int(pid))
+        return _posix_pid_alive(int(pid))
+    except Exception:
+        return None
+
+
+def _posix_pid_alive(pid: int) -> bool:
+    """Purpose: query POSIX process state without terminating the process."""
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -116,8 +125,10 @@ class ReviewStore:
             conn.executescript(SCHEMA_SQL)
             self._ensure_columns(conn)
             self._normalize_stored_agenda_statuses(conn)
-            self._normalize_stored_application_statuses(conn)
             self._materialize_stored_review_corrections(conn)
+            self._normalize_stored_application_statuses(conn)
+            self._repair_completed_application_source_statuses(conn)
+            self._mark_stored_unprocessable_agenda_hits(conn)
             self._refresh_all_run_counters(conn)
 
     def backup_to(self, destination: Path) -> Path:
@@ -204,32 +215,105 @@ class ReviewStore:
     def _normalize_stored_application_statuses(self, conn: sqlite3.Connection) -> None:
         """Purpose: migrate older optimistic extraction statuses into review queues."""
 
+        rows = conn.execute(
+            """
+            SELECT app.*, agenda.classification AS agenda_classification
+            FROM application_extractions app
+            JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
+            WHERE app.status IN (?, ?)
+            """,
+            (statuses.APPLICATION_EXTRACTED, statuses.ACCEPTED),
+        ).fetchall()
+        for raw in rows:
+            row = dict(raw)
+            next_status = self._normalized_application_status(row)
+            if next_status and next_status != row["status"]:
+                self._set_application_status(conn, int(row["id"]), next_status)
+
+    def _normalized_application_status(self, row: dict[str, Any]) -> str | None:
+        """Purpose: choose the safest stored status after QC rules evolve."""
+
+        if row["status"] == statuses.APPLICATION_EXTRACTED and target_is_false(row.get("target_project")):
+            return statuses.REJECTED
+        if application_quality_issues(row):
+            return statuses.NEEDS_OPERATOR_REVIEW
+        return None
+
+    def _set_application_status(self, conn: sqlite3.Connection, extraction_id: int, status: str) -> None:
+        """Purpose: keep application and current review status aligned."""
+
+        stamp = _now()
+        conn.execute(
+            "UPDATE application_extractions SET status = ?, updated_at = ? WHERE id = ?",
+            (status, stamp, extraction_id),
+        )
+        conn.execute(
+            "UPDATE operator_reviews SET status = ?, reviewed_timestamp = ? WHERE extraction_id = ?",
+            (status, stamp, extraction_id),
+        )
+
+    def _repair_completed_application_source_statuses(self, conn: sqlite3.Connection) -> None:
+        """Purpose: clear stale in-progress source rows after final extraction rows exist."""
+
         conn.execute(
             """
-            UPDATE application_extractions
-            SET status = ?, updated_at = ?
-            WHERE status = ? AND target_project = 0
-            """,
-            (statuses.REJECTED, _now(), statuses.APPLICATION_EXTRACTED),
-        )
-        conn.execute(
-            f"""
-            UPDATE application_extractions
-            SET status = ?, updated_at = ?
-            WHERE status = ?
-              AND (
-                target_project IS NULL OR target_project != 1
-                OR trim(coalesce(section5_description, '')) = ''
-                OR NOT ({self._mailable_contact_sql()})
-                OR EXISTS (
-                    SELECT 1 FROM agenda_items
-                    WHERE agenda_items.id = application_extractions.agenda_item_id
-                      AND agenda_items.classification != ?
-                )
+            UPDATE source_items
+            SET processing_status = ?, updated_at = ?
+            WHERE source_kind = 'application'
+              AND processing_status NOT IN (?, ?)
+              AND EXISTS (
+                SELECT 1
+                FROM application_extractions app
+                WHERE app.source_item_id = source_items.id
+                  AND app.status IN (?, ?, ?, ?)
               )
             """,
-            (statuses.NEEDS_OPERATOR_REVIEW, _now(), statuses.APPLICATION_EXTRACTED, statuses.AGENDA_HIT),
+            (
+                statuses.APPLICATION_EXTRACTED,
+                _now(),
+                statuses.APPLICATION_EXTRACTED,
+                statuses.APPLICATION_UNAVAILABLE,
+                statuses.APPLICATION_EXTRACTED,
+                statuses.NEEDS_OPERATOR_REVIEW,
+                statuses.ACCEPTED,
+                statuses.REJECTED,
+            ),
         )
+
+    def _mark_stored_unprocessable_agenda_hits(self, conn: sqlite3.Connection) -> None:
+        """Purpose: stop historical no-application hits from reappearing every run."""
+
+        reasons = (
+            ("application_missing", "No standardized Land Use Application attachment found; review agenda hit before rerun"),
+            ("application_skip_source_reused", "Application source already completed by another agenda item; review duplicate agenda hit before rerun"),
+            ("application_unavailable", "Application attachment is unavailable from Legistar; review agenda hit before rerun"),
+            ("application_skip_unavailable_source", "Application attachment is unavailable from Legistar; review agenda hit before rerun"),
+        )
+        for stage, reason in reasons:
+            conn.execute(
+                """
+                UPDATE agenda_items
+                SET classification = ?, confidence = 0, reason = ?, evidence_snippet = ?, updated_at = ?
+                WHERE classification = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM application_extractions app
+                    WHERE app.agenda_item_id = agenda_items.id
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM run_events event
+                    WHERE event.stage = ?
+                      AND event.source_identity = 'agenda_item:' || agenda_items.id
+                  )
+                """,
+                (
+                    statuses.NEEDS_AGENDA_REVIEW,
+                    reason,
+                    reason[:240],
+                    _now(),
+                    statuses.AGENDA_HIT,
+                    stage,
+                ),
+            )
 
     def _materialize_stored_review_corrections(self, conn: sqlite3.Connection) -> None:
         """Purpose: upgrade old DBs so accepted rows carry final corrected values."""
@@ -250,24 +334,6 @@ class ReviewStore:
                 continue
             if isinstance(corrected_fields, dict):
                 self._materialize_application_corrections(conn, int(row["id"]), corrected_fields)
-
-    def _mailable_contact_sql(self) -> str:
-        """Purpose: mirror contact QC in SQLite startup migration SQL."""
-
-        checks = []
-        for prefix in CONTACT_PREFIXES:
-            checks.append(
-                f"""
-                (
-                    trim(coalesce({prefix}_mailing_address, '')) != ''
-                    AND (
-                        trim(coalesce({prefix}_name, '')) != ''
-                        OR trim(coalesce({prefix}_company, '')) != ''
-                    )
-                )
-                """
-            )
-        return " OR ".join(checks)
 
     def _refresh_all_run_counters(self, conn: sqlite3.Connection) -> None:
         """Purpose: keep historical run counters aligned after status migrations."""
@@ -1306,16 +1372,56 @@ class ReviewStore:
             rows = conn.execute(
                 """
                 SELECT app.*, agenda.event_id, agenda.city_item_id, agenda.file_id, agenda.meeting_date,
-                       agenda.description AS agenda_description, review.corrected_fields_json, review.notes
+                       agenda.description AS agenda_description, agenda.classification AS agenda_classification,
+                       review.corrected_fields_json, review.notes
                 FROM application_extractions app
                 JOIN agenda_items agenda ON agenda.id = app.agenda_item_id
                 LEFT JOIN operator_reviews review ON review.extraction_id = app.id
                 WHERE app.status = ?
+                  AND (? != ? OR agenda.classification = ?)
                 ORDER BY agenda.meeting_date, agenda.event_id, agenda.city_item_id
                 """,
-                (status,),
+                (status, status, statuses.ACCEPTED, statuses.AGENDA_HIT),
             ).fetchall()
-            return [self._apply_corrections(dict(row)) for row in rows]
+            export_rows = [self._apply_corrections(dict(row)) for row in rows]
+            if status == statuses.ACCEPTED:
+                return self._dedupe_accepted_export_rows(export_rows)
+            return export_rows
+
+    def _dedupe_accepted_export_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Purpose: export the newest accepted row for each application source."""
+
+        seen_urls: set[str] = set()
+        seen_attachments: set[str] = set()
+        kept: list[dict[str, Any]] = []
+        for row in sorted(rows, key=self._newest_export_key, reverse=True):
+            source_url = str(row.get("source_url") or "").strip()
+            attachment_id = str(row.get("attachment_id") or "").strip()
+            if source_url and source_url in seen_urls:
+                continue
+            if attachment_id and attachment_id in seen_attachments:
+                continue
+            if source_url:
+                seen_urls.add(source_url)
+            if attachment_id:
+                seen_attachments.add(attachment_id)
+            kept.append(row)
+        return sorted(kept, key=self._stable_export_key)
+
+    def _newest_export_key(self, row: dict[str, Any]) -> tuple[str, int]:
+        """Purpose: prefer the newest accepted extraction for duplicate sources."""
+
+        return (str(row.get("meeting_date") or ""), int(row.get("id") or 0))
+
+    def _stable_export_key(self, row: dict[str, Any]) -> tuple[str, str, str, int]:
+        """Purpose: keep exports deterministic after source dedupe."""
+
+        return (
+            str(row.get("meeting_date") or ""),
+            str(row.get("event_id") or ""),
+            str(row.get("city_item_id") or ""),
+            int(row.get("id") or 0),
+        )
 
     def _apply_corrections(self, row: dict[str, Any]) -> dict[str, Any]:
         """Purpose: overlay operator corrections onto export rows."""

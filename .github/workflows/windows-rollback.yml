@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "MSIX version to restore, for example 0.1.123.0"
+        description: "MSIX version to restore, for example 1.0.123.0"
         required: true
         type: string
       stable_tag:
@@ -29,7 +29,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:ROLLBACK_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-            throw "Rollback version must use four numeric parts, for example 0.1.123.0"
+            throw "Rollback version must use four numeric parts, for example 1.0.123.0"
           }
           $versionTag = "pcw-windows-v$env:ROLLBACK_VERSION"
           New-Item -ItemType Directory -Force -Path rollback-assets | Out-Null

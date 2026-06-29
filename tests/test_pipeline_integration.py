@@ -405,6 +405,7 @@ def test_application_queue_skips_reused_attachment_across_agenda_items(tmp_path)
     assert legistar.downloads == 1
     assert docling.calls == 1
     assert "application_skip_source_reused" in stages
+    assert len(workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW)) == 1
     assert len(workbench.store.list_application_extractions()) == 1
 
 
@@ -423,7 +424,8 @@ def test_application_download_404_is_logged_unavailable_and_run_continues(tmp_pa
     events = workbench.store.list_run_events(1) + workbench.store.list_run_events(2)
     stages = [event["stage"] for event in events]
     assert statuses.APPLICATION_UNAVAILABLE in stages
-    assert "application_skip_unavailable_source" in stages
+    assert "application_skip_unavailable_source" not in stages
+    assert len(workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW)) == 1
     assert len(workbench.store.list_application_extractions()) == 1
     with workbench.store.transaction() as conn:
         row = conn.execute(

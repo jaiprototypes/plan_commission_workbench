@@ -77,6 +77,8 @@ def test_run_ui_exposes_only_diagnostic_send_action() -> None:
     assert "connectDiagnosticEmailProvider" not in script
     assert "/settings/diagnostic-email/oauth" not in script
     assert "/diagnostics/email" in script
+    assert "window.confirm" not in script
+    assert "include_state_bundle: true" in script
 
 
 def test_agenda_js_exposes_review_actions() -> None:
@@ -302,7 +304,7 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
     removed_oauth_callback = client.get(
         "/settings/diagnostic-email/oauth/gmail/callback?state=oauth-state&code=oauth-code"
     )
-    manual = client.post("/diagnostics/email", json={"run_id": None, "include_state_bundle": False})
+    manual = client.post("/diagnostics/email", json={"run_id": None})
     cleared = client.delete("/settings/diagnostic-email/credential")
     cleared_all = client.delete("/settings/secrets")
 
@@ -312,6 +314,9 @@ def test_server_diagnostic_email_and_secret_endpoints(monkeypatch, tmp_path) -> 
     assert removed_oauth_start.status_code == 404
     assert removed_oauth_callback.status_code == 404
     assert manual.json()["sent"] is True
+    assert manual.json()["attached_state_bundle"] is True
+    assert fake.sent_report[1] is True
+    assert fake.sent_report[2].suffix == ".zip"
     assert cleared.json()["credential_deleted"] is True
     assert cleared_all.json()["diagnostic_email"]["credential_deleted"] is True
 

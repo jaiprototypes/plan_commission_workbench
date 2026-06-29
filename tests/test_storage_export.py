@@ -475,6 +475,165 @@ def test_startup_migration_downgrades_public_comment_hits_and_counters(tmp_path)
     assert reopened.list_agenda_items(statuses.NOT_TARGET_PROJECT)[0]["city_item_id"] == "71173"
 
 
+def test_initialize_demotes_accepted_row_when_agenda_is_not_hit(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 5, 11), dt.date(2026, 5, 11), None)
+    extraction_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 5, 11),
+        city_item_id="100730",
+        applicant=ContactFields(
+            name="Scott Frank",
+            company="Oak Park Place",
+            mailing_address="719 Jupiter Dr, Madison, WI 53718",
+        ),
+        project_contact=ContactFields(),
+    )
+    row = store.list_application_extractions(statuses.ACCEPTED)[0]
+    store.review_agenda_item(int(row["agenda_item_id"]), statuses.NOT_TARGET_PROJECT)
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+
+    assert reopened.list_application_extractions(statuses.ACCEPTED) == []
+    reviewed = reopened.list_application_extractions(statuses.NEEDS_OPERATOR_REVIEW)[0]
+    assert reviewed["id"] == extraction_id
+    assert "Agenda item is not currently classified as a hit" in reviewed["quality_issues"]
+    with reopened.transaction() as conn:
+        review = conn.execute("SELECT status FROM operator_reviews WHERE extraction_id = ?", (extraction_id,)).fetchone()
+    assert review["status"] == statuses.NEEDS_OPERATOR_REVIEW
+
+
+def test_initialize_demotes_clean_row_with_missing_or_outlier_unit_count(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    missing_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 1),
+        city_item_id="1001",
+        applicant=ContactFields(company="Missing Units LLC", mailing_address="1 Main St, Madison, WI"),
+        project_contact=ContactFields(),
+        unit_count=None,
+        bypass_review=True,
+    )
+    outlier_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 2),
+        city_item_id="1002",
+        applicant=ContactFields(company="Outlier Units LLC", mailing_address="2 Main St, Madison, WI"),
+        project_contact=ContactFields(),
+        unit_count=1684,
+        bypass_review=True,
+    )
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+    issues_by_id = {row["id"]: row["quality_issues"] for row in reopened.list_application_extractions(statuses.NEEDS_OPERATOR_REVIEW)}
+
+    assert "Unit count is missing" in issues_by_id[missing_id]
+    assert "Unit count is unusually high" in issues_by_id[outlier_id]
+
+
+def test_initialize_repairs_stale_application_source_status(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    extraction_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 1),
+        city_item_id="1001",
+        applicant=ContactFields(company="Source Repair LLC", mailing_address="1 Main St, Madison, WI"),
+        project_contact=ContactFields(),
+    )
+    with store.transaction() as conn:
+        source_id = conn.execute(
+            "SELECT source_item_id FROM application_extractions WHERE id = ?",
+            (extraction_id,),
+        ).fetchone()["source_item_id"]
+        conn.execute(
+            "UPDATE source_items SET processing_status = ? WHERE id = ?",
+            (statuses.APPLICATION_LLM_EXTRACTING, source_id),
+        )
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+    with reopened.transaction() as conn:
+        source = conn.execute("SELECT processing_status FROM source_items WHERE id = ?", (source_id,)).fetchone()
+
+    assert source["processing_status"] == statuses.APPLICATION_EXTRACTED
+
+
+def test_initialize_marks_unprocessable_agenda_hit_for_review(tmp_path) -> None:
+    db_path = tmp_path / "workbench.db"
+    store = ReviewStore(db_path)
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 1, 31), None)
+    source_id = store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="1",
+        file_id="9001",
+        attachment_id=None,
+        source_url="https://example.test/agenda.pdf",
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment("1", "1001", "9001", dt.date(2026, 1, 1), "Construct apartments"),
+        AgendaClassification("1001", statuses.AGENDA_HIT, 0.9, "Housing", "Construct apartments"),
+    )
+    store.log_event(run_id, "application_missing", "application", f"agenda_item:{agenda_id}", "No standardized application")
+
+    reopened = ReviewStore(db_path)
+    reopened.initialize()
+    row = reopened.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW)[0]
+
+    assert row["id"] == agenda_id
+    assert "No standardized Land Use Application" in row["reason"]
+
+
+def test_accepted_export_uses_newest_row_per_application_source(tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 1, 1), dt.date(2026, 2, 28), None)
+    older_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 1, 1),
+        city_item_id="1001",
+        applicant=ContactFields(name="Older Source", company="Shared LLC", mailing_address="1 Main St, Madison, WI"),
+        project_contact=ContactFields(),
+        source_url="https://example.test/shared-application.pdf",
+        attachment_id="shared-attachment",
+    )
+    newer_id = _accepted_extraction(
+        store,
+        run_id,
+        meeting_date=dt.date(2026, 2, 1),
+        city_item_id="1002",
+        applicant=ContactFields(name="Newer Source", company="Shared LLC", mailing_address="1 Main St, Madison, WI"),
+        project_contact=ContactFields(),
+        source_url="https://example.test/shared-application.pdf",
+        attachment_id="shared-attachment",
+    )
+
+    rows = store.accepted_export_rows(statuses.ACCEPTED)
+
+    assert [row["id"] for row in rows] == [newer_id]
+    assert older_id != newer_id
+
+
 def test_agenda_review_approval_unsticks_related_clean_application(tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()
@@ -604,6 +763,7 @@ def test_review_acceptance_rejects_uncertain_or_unmailable_rows(tmp_path) -> Non
         statuses.ACCEPTED,
         {
             "target_project": True,
+            "unit_count": "12",
             "applicant_company": "Applicant LLC",
             "applicant_mailing_address": "123 Main Street, Madison, WI 53703",
         },
@@ -665,6 +825,7 @@ def test_saved_review_corrections_clear_qc_and_accept_later(tmp_path) -> None:
         statuses.NEEDS_OPERATOR_REVIEW,
         {
             "target_project": True,
+            "unit_count": "12",
             "applicant_name": "",
             "applicant_company": "Known Developer LLC",
             "applicant_mailing_address": "123 Main Street, Madison, WI 53703",
@@ -769,6 +930,7 @@ def test_initialize_materializes_historical_review_corrections(tmp_path) -> None
                         "applicant_name": "Historical Corrected",
                         "applicant_company": "Historical Housing LLC",
                         "applicant_mailing_address": "789 East Main Street, Madison, WI 53703",
+                        "unit_count": "12",
                     }
                 ),
                 "old client correction",
@@ -858,6 +1020,22 @@ def test_watchdog_marks_stale_application_docling_run_and_preserves_failure(tmp_
     assert late_completion is False
 
 
+def test_watchdog_logs_warning_only_when_run_is_marked(caplog, tmp_path) -> None:
+    store = ReviewStore(tmp_path / "workbench.db")
+    store.initialize()
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    assert store.heartbeat_run(run_id, statuses.APPLICATION_DOCLING, "docling", "agenda_item:240", "Extracting stuck PDF")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET heartbeat_at = ? WHERE id = ?", ("2026-01-01T00:00:00Z", run_id))
+
+    caplog.set_level("WARNING", logger="plan_commission_workbench.watchdog")
+
+    RunWatchdog(store, stale_after_seconds=1).audit_once()
+
+    assert "Run watchdog marked run" in caplog.text
+    assert str(run_id) in caplog.text
+
+
 def test_watchdog_kills_stale_live_worker(monkeypatch, tmp_path) -> None:
     store = ReviewStore(tmp_path / "workbench.db")
     store.initialize()
@@ -909,6 +1087,32 @@ def test_pid_alive_uses_windows_query_without_os_kill(monkeypatch) -> None:
 
     assert _pid_alive(12345) is True
     assert killed == []
+
+
+def test_pid_alive_returns_unknown_when_probe_fails(monkeypatch) -> None:
+    def broken_probe(_pid, _signal):
+        raise SystemError("bad process handle")
+
+    monkeypatch.setattr("plan_commission_workbench.storage.os.name", "posix")
+    monkeypatch.setattr("plan_commission_workbench.storage.os.kill", broken_probe)
+
+    assert _pid_alive(12345) is None
+
+
+def test_watchdog_safe_audit_deduplicates_repeated_errors(caplog) -> None:
+    class BrokenStore:
+        """Purpose: simulate an audit backend error without a database."""
+
+        def mark_stale_running_runs(self, _stale_after_seconds):
+            raise RuntimeError("temporary audit failure")
+
+    caplog.set_level("WARNING", logger="plan_commission_workbench.watchdog")
+    watchdog = RunWatchdog(BrokenStore(), stale_after_seconds=1)
+
+    watchdog._safe_audit()
+    watchdog._safe_audit()
+
+    assert caplog.text.count("Run watchdog audit skipped") == 1
 
 
 def test_label_export_keeps_newest_duplicate_contact_and_older_new_contact(tmp_path) -> None:
@@ -965,9 +1169,15 @@ def _accepted_extraction(
     city_item_id: str,
     applicant: ContactFields,
     project_contact: ContactFields,
+    unit_count: int | None = 10,
+    source_url: str | None = None,
+    attachment_id: str | None = None,
+    bypass_review: bool = False,
 ) -> int:
     """Purpose: seed one accepted application row for export tests."""
 
+    source_url = source_url or f"https://example.test/application-{city_item_id}.pdf"
+    attachment_id = attachment_id or f"attachment-{city_item_id}"
     source_id = store.upsert_source_item(
         run_id=run_id,
         source_kind="agenda",
@@ -989,8 +1199,8 @@ def _accepted_extraction(
         source_kind="application",
         event_id=f"event-{city_item_id}",
         file_id=city_item_id,
-        attachment_id=f"attachment-{city_item_id}",
-        source_url=f"https://example.test/application-{city_item_id}.pdf",
+        attachment_id=attachment_id,
+        source_url=source_url,
         content_hash=f"application-hash-{city_item_id}",
         processing_status=statuses.APPLICATION_EXTRACTED,
     )
@@ -999,18 +1209,33 @@ def _accepted_extraction(
         app_source_id,
         ApplicationExtraction(
             agenda_item_id=agenda_id,
-            source_url=f"https://example.test/application-{city_item_id}.pdf",
-            attachment_id=f"attachment-{city_item_id}",
+            source_url=source_url,
+            attachment_id=attachment_id,
             applicant=applicant,
             project_contact=project_contact,
             owner=ContactFields(),
             section5_description="Construct housing.",
-            unit_count=10,
+            unit_count=unit_count,
             status=statuses.APPLICATION_EXTRACTED,
             target_project=True,
         ),
     )
-    store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
+    if bypass_review:
+        with store.transaction() as conn:
+            conn.execute(
+                "UPDATE application_extractions SET status = ? WHERE id = ?",
+                (statuses.ACCEPTED, extraction_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO operator_reviews
+                (extraction_id, status, corrected_fields_json, notes, reviewed_timestamp)
+                VALUES (?, ?, '{}', NULL, ?)
+                """,
+                (extraction_id, statuses.ACCEPTED, "2026-01-01T00:00:00Z"),
+            )
+    else:
+        store.review_application(extraction_id, statuses.ACCEPTED, {}, None)
     return extraction_id
 
 

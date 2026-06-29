@@ -20,10 +20,10 @@ from repository variables and secrets before packaging. The support password is
 not committed to source, stored in SQLite, written to local settings JSON, or
 shown in the UI.
 
-Manual diagnostics email a compact report to the GECG support inbox. Automatic
-failure reporting can send compact failure reports when enabled by the build
-configuration and deduplicates repeated failures. Full state bundles remain a
-manual action because they can contain the SQLite database and contact data.
+Manual diagnostics email a short readable summary to the GECG support inbox and
+attach the same state bundle ZIP produced by the State Bundle action. Automatic
+failure reporting can send compact text failure reports when enabled by the
+build configuration and deduplicates repeated failures.
 
 Windows Credential Manager is still used for the operator's OpenAI API key. The
 app keeps support paths for clearing the OpenAI key, legacy diagnostic email
@@ -57,8 +57,8 @@ secrets.
 
 The intended loop is:
 
-`diagnostic email -> inspect report/state -> patch in Codex -> push main -> signed App Installer update`
+`diagnostic email with state bundle -> inspect state -> patch in Codex -> push main -> signed App Installer update`
 
-The package icon is a generated Gould-style `G` mark derived from the company
-browser icon style. Its color, tilt, and proportions vary from the MSIX version
-so a user can visually confirm that a new update reached the machine.
+The package icon is a transparent Gould-style `G` mark derived from the company
+browser icon style. MSIX builds include target-size and unplated shortcut assets
+so Windows should show the `G` without a colored tile or bar behind it.

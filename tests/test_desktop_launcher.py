@@ -143,7 +143,11 @@ def test_windows_build_produces_msix_and_appinstaller_artifacts() -> None:
     assert "$highlightGreen" in script
     assert "Get-StableLogoHash" in script
     assert "$tiltDegrees" in script
-    assert 'New-MsixLogo (Join-Path $assetDir "Square150x150Logo.png") 150 $resolvedVersion' in script
+    assert "[System.Drawing.Imaging.PixelFormat]::Format32bppArgb" in script
+    assert "$graphics.Clear([System.Drawing.Color]::Transparent)" in script
+    assert "New-MsixLogoSet $assetDir $resolvedVersion" in script
+    assert "Square44x44Logo.targetsize-{0}.png" in script
+    assert "Square44x44Logo.targetsize-{0}_altform-unplated.png" in script
     assert "Test-StagedExecutable $MsixStagingDir" in script
     assert "Restore-TorchConfigSources" in script
     assert "Remove-MsixTorchSourcePayload" in script
@@ -207,6 +211,7 @@ def test_msix_manifest_template_declares_packaged_desktop_app() -> None:
     root = ET.fromstring(content)
     ns = {
         "pkg": "http://schemas.microsoft.com/appx/manifest/foundation/windows10",
+        "uap": "http://schemas.microsoft.com/appx/manifest/uap/windows10",
         "uap10": "http://schemas.microsoft.com/appx/manifest/uap/windows10/10",
         "rescap": "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities",
     }
@@ -225,6 +230,9 @@ def test_msix_manifest_template_declares_packaged_desktop_app() -> None:
     assert application.attrib[f"{{{ns['uap10']}}}TrustLevel"] == "mediumIL"
     assert capability is not None
     assert capability.attrib["Name"] == "runFullTrust"
+    visual_elements = application.find("uap:VisualElements", ns)
+    assert visual_elements is not None
+    assert visual_elements.attrib["BackgroundColor"] == "transparent"
 
 
 def test_appinstaller_template_points_to_msix_and_launch_updates() -> None:

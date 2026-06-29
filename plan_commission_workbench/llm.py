@@ -309,10 +309,12 @@ class LLMJsonClient:
         project_contact = self._contact(payload.get("project_contact"))
         owner = self._contact(payload.get("owner"))
         section5_description = self._text_or_none(payload.get("section5_description"))
+        unit_count = self._int_or_none(payload.get("unit_count"))
         status = application_status(
             {
                 "target_project": target_project,
                 "section5_description": section5_description,
+                "unit_count": unit_count,
                 "applicant_name": applicant.name,
                 "applicant_company": applicant.company,
                 "applicant_mailing_address": applicant.mailing_address,
@@ -332,7 +334,7 @@ class LLMJsonClient:
             project_contact=project_contact,
             owner=owner,
             section5_description=section5_description,
-            unit_count=self._int_or_none(payload.get("unit_count")),
+            unit_count=unit_count,
             status=status,
             target_project=target_project,
             target_reason=target_reason,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from pathlib import Path
 
 import pytest
@@ -116,12 +115,28 @@ def test_manual_run_report_includes_run_context_without_secret(tmp_path) -> None
     store.log_event(run_id, "failed_application_download", "legistar", "agenda_item:1", "broken link")
 
     result = service.send_run_report(run_id)
-    body = json.loads(sender.messages[0]["body"])
+    body = sender.messages[0]["body"]
 
     assert result["sent"] is True
-    assert body["run"]["id"] == run_id
-    assert body["recent_events"][-1]["message"] == "broken link"
+    assert f"Run ID: {run_id}" in body
+    assert "broken link" in body
+    assert not body.lstrip().startswith("{")
     assert "smtp-secret" not in sender.messages[0]["body"]
+
+
+def test_manual_run_report_attaches_state_bundle_without_json_body(tmp_path) -> None:
+    service, store, _credential_store, sender = make_service(tmp_path)
+    run_id = store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 1), None)
+    bundle_path = tmp_path / "pcw_state_bundle_test.zip"
+    bundle_path.write_bytes(b"zip-bytes")
+
+    result = service.send_run_report(run_id, include_state_bundle=True, state_bundle_path=bundle_path)
+    message = sender.messages[0]
+
+    assert result["attached_state_bundle"] is True
+    assert message["attachments"] == [bundle_path]
+    assert f"Attached state bundle: {bundle_path.name}" in message["body"]
+    assert not message["body"].lstrip().startswith("{")
 
 
 def test_clear_diagnostic_email_credential(tmp_path) -> None:

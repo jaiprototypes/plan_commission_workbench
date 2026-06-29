@@ -82,6 +82,10 @@ that `workbench.db` into another machine's data folder reproduces the same
 dedupe/skip state, so overlapping test runs resume near the failing item instead
 of scraping every completed agenda and application again.
 
+Use **Send Diagnostics** to email support a short run summary with that state
+bundle ZIP attached. The email body is intentionally plain text; the ZIP carries
+the database and logs needed for review.
+
 ## Runtime Safeguards
 
 Long Docling conversions run in isolated child worker process groups with hard
@@ -136,9 +140,9 @@ on release tag `pcw-windows-stable` by default:
 - `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.appinstaller`
 - `https://github.com/jaiprototypes/plan_commission_workbench/releases/download/pcw-windows-stable/PlanCommissionWorkbench.msix`
 
-The Windows package icon is a generated Gould-style `G` mark. Its green/yellow
-shade, tilt, and proportions vary slightly from the MSIX package version so a
-user can visually confirm that an update has reached the machine.
+The Windows package icon is a transparent Gould-style `G` mark. The build emits
+target-size and unplated shortcut assets so Windows should show the `G` without
+a colored tile or bar behind it.
 
 Install production machines from the stable `.appinstaller` URL, not from a
 per-run GitHub Actions artifact. Actions artifacts are useful verification

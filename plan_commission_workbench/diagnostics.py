@@ -303,14 +303,7 @@ class DiagnosticEmailService:
 
         settings = self._configured_settings()
         subject = self._subject("test", None)
-        body = json.dumps(
-            {
-                "kind": "diagnostic_email_test",
-                "support_install_id": self.settings_store.support_install_id(),
-                "app_version": self._app_version(),
-            },
-            indent=2,
-        )
+        body = self._plain_body("Diagnostic email test.", None, [])
         self._send_message(settings=settings, subject=subject, body=body)
         return {"sent": True, **self.status()}
 
@@ -329,7 +322,7 @@ class DiagnosticEmailService:
         self._send_message(
             settings=settings,
             subject=self._subject("manual", run_id),
-            body=json.dumps(report, indent=2, default=str),
+            body=self._plain_body("Manual diagnostics report.", report, attachments),
             attachments=attachments,
         )
         return {"sent": True, "attached_state_bundle": bool(attachments), "report": report}
@@ -350,7 +343,7 @@ class DiagnosticEmailService:
             self._send_message(
                 settings=settings,
                 subject=self._subject("failure", run_id),
-                body=json.dumps(report, indent=2, default=str),
+                body=self._plain_body("Automatic failure diagnostics report.", report, []),
             )
             if failure_key:
                 self.settings_store.save_last_failure_email_key(failure_key)
@@ -399,6 +392,45 @@ class DiagnosticEmailService:
 
         password = self._read_smtp_password()
         self.sender.send(settings=settings, password=password, subject=subject, body=body, attachments=attachments)
+
+    def _plain_body(self, heading: str, report: dict[str, Any] | None, attachments: list[Path]) -> str:
+        """Purpose: keep diagnostic emails readable while the zip carries raw state."""
+
+        lines = [
+            heading,
+            "",
+            f"Support install ID: {self.settings_store.support_install_id()}",
+            f"App version: {self._app_version()}",
+        ]
+        if report and report.get("run"):
+            lines.extend(self._run_body_lines(report["run"]))
+        if report:
+            lines.extend(self._event_body_lines(report.get("recent_events") or []))
+        if attachments:
+            lines.append(f"Attached state bundle: {attachments[0].name}")
+        return "\n".join(lines)
+
+    def _run_body_lines(self, run: dict[str, Any]) -> list[str]:
+        """Purpose: summarize the selected run without embedding JSON logs."""
+
+        lines = [
+            f"Run ID: {run.get('id')}",
+            f"Run status: {run.get('status')}",
+            f"Date range: {run.get('date_from')} to {run.get('date_to')}",
+        ]
+        if run.get("last_error"):
+            lines.append(f"Last error: {run['last_error']}")
+        return lines
+
+    def _event_body_lines(self, events: list[dict[str, Any]]) -> list[str]:
+        """Purpose: include the latest run activity without dumping JSON."""
+
+        if not events:
+            return []
+        lines = ["Recent events:"]
+        for event in events[-5:]:
+            lines.append(f"- {event.get('stage')}: {event.get('message')}")
+        return lines
 
     def _read_smtp_password(self) -> str:
         """Purpose: read the build-baked SMTP secret only while sending."""

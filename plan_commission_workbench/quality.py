@@ -8,6 +8,7 @@ from typing import Any
 from . import statuses
 
 CONTACT_PREFIXES = ("applicant", "project_contact", "owner")
+HIGH_UNIT_COUNT_REVIEW_THRESHOLD = 1000
 RAW_LABEL_WORDS = (
     "applicant name",
     "city/state/zip",
@@ -67,6 +68,9 @@ def application_quality_issues(row: dict[str, Any]) -> list[str]:
         issues.append("Target project is not confirmed")
     if not clean_text(row.get("section5_description")):
         issues.append("Section 5 description is missing")
+    unit_issue = unit_count_issue(row.get("unit_count"), row.get("target_project"))
+    if unit_issue:
+        issues.append(unit_issue)
     if not any(mailable_contact(row, prefix) for prefix in CONTACT_PREFIXES):
         issues.append("No mailable contact has a name or company plus address")
     if row.get("agenda_classification") and row.get("agenda_classification") != statuses.AGENDA_HIT:
@@ -75,6 +79,25 @@ def application_quality_issues(row: dict[str, Any]) -> list[str]:
     if raw_issue:
         issues.append(raw_issue)
     return issues
+
+
+def unit_count_issue(unit_count: Any, target_project: Any) -> str | None:
+    """Purpose: keep confirmed target projects from exporting bad unit counts."""
+
+    if not target_is_true(target_project):
+        return None
+    text = clean_text(unit_count)
+    if not text:
+        return "Unit count is missing"
+    try:
+        value = int(text)
+    except ValueError:
+        return "Unit count is not numeric"
+    if value <= 0:
+        return "Unit count must be greater than zero"
+    if value > HIGH_UNIT_COUNT_REVIEW_THRESHOLD:
+        return "Unit count is unusually high"
+    return None
 
 
 def mailable_contact(row: dict[str, Any], prefix: str) -> tuple[str, str, str] | None:

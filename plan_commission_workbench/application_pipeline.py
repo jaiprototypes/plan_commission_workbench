@@ -69,13 +69,19 @@ class ApplicationPipeline:
             raise WorkbenchStop(statuses.FAILED_APPLICATION_DOWNLOAD, str(exc)) from exc
         attachment = self.legistar.find_application_attachment(agenda_item, event_items)
         if not attachment:
-            self.store.log_event(run_id, "application_missing", "application", identity, "No standardized Land Use Application attachment found")
+            reason = "No standardized Land Use Application attachment found; review agenda hit before rerun"
+            self.store.mark_agenda_needs_review(int(agenda_item["id"]), reason)
+            self.store.log_event(run_id, "application_missing", "application", identity, reason)
             return
         if self.store.application_complete(attachment.agenda_item_id, attachment.source_url, attachment.attachment_id):
             self.store.log_event(run_id, "application_skip", "application", identity, "Application already extracted by source identity")
             return
         completed_source = self.store.completed_application_source(attachment.source_url, attachment.attachment_id)
         if completed_source:
+            self.store.mark_agenda_needs_review(
+                int(agenda_item["id"]),
+                "Application source already completed by another agenda item; review duplicate agenda hit before rerun",
+            )
             self.store.log_event(
                 run_id,
                 "application_skip_source_reused",
@@ -86,6 +92,10 @@ class ApplicationPipeline:
             return
         unavailable_source = self.store.unavailable_application_source(attachment.source_url, attachment.attachment_id)
         if unavailable_source:
+            self.store.mark_agenda_needs_review(
+                int(agenda_item["id"]),
+                "Application attachment is unavailable from Legistar; review agenda hit before rerun",
+            )
             self.store.log_event(
                 run_id,
                 "application_skip_unavailable_source",
@@ -120,6 +130,10 @@ class ApplicationPipeline:
             if exc.is_durable_missing():
                 pdf_path.unlink(missing_ok=True)
                 self.store.set_source_status(source_id, statuses.APPLICATION_UNAVAILABLE)
+                self.store.mark_agenda_needs_review(
+                    int(agenda_item["id"]),
+                    "Application attachment is unavailable from Legistar; review agenda hit before rerun",
+                )
                 self.store.log_event(
                     run_id,
                     statuses.APPLICATION_UNAVAILABLE,

@@ -53,7 +53,7 @@ class DiagnosticEmailRequest(BaseModel):
 
 class DiagnosticEmailSendRequest(BaseModel):
     run_id: int | None = None
-    include_state_bundle: bool = False
+    include_state_bundle: bool = True
 
 
 def create_app(start_watchdog: bool = True) -> FastAPI:

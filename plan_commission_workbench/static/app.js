@@ -79,13 +79,12 @@ async function promptForOpenAiKey() {
 }
 
 async function sendDiagnosticEmail() {
-  const includeStateBundle = window.confirm("Attach a full state bundle? This may include contact data.");
   await getJson("/diagnostics/email", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({run_id: selectedRunId ? Number(selectedRunId) : null, include_state_bundle: includeStateBundle}),
+    body: JSON.stringify({run_id: selectedRunId ? Number(selectedRunId) : null, include_state_bundle: true}),
   });
-  window.alert("Diagnostic email sent.");
+  window.alert("Diagnostic email sent with state bundle.");
 }
 
 async function loadRuns() {
