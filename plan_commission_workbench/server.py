@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import datetime as dt
+import json
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+from . import statuses
+from .api import PlanCommissionWorkbench
+from .cities.milwaukee import MilwaukeeCpcMvpService
+from .legistar import LegistarClient
+from .models import RunRequest
+from .watchdog import RunWatchdog
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(PACKAGE_ROOT / "templates"))
+
+
+class MadisonRunRequest(BaseModel):
+    date_from: dt.date
+    date_to: dt.date
+    request_text: str | None = None
+
+
+class MilwaukeeMvpRequest(BaseModel):
+    date_from: dt.date
+    date_to: dt.date
+    max_items: int = 6
+    documents_per_item: int = 1
+    include_text: bool = False
+    include_llm: bool = False
+
+
+class MilwaukeeMvpSnapshotRequest(BaseModel):
+    findings: dict[str, Any]
+
+
+class ReviewRequest(BaseModel):
+    status: str
+    corrected_fields: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class AgendaReviewRequest(BaseModel):
+    classification: str
+    reason: str | None = None
+
+
+class ExportRequest(BaseModel):
+    output: str = "data/exports/madison_review.xlsx"
+    status: str = statuses.ACCEPTED
+
+
+class OpenAIKeyRequest(BaseModel):
+    api_key: str
+
+
+class DiagnosticEmailRequest(BaseModel):
+    enabled: bool = False
+
+
+class DiagnosticEmailSendRequest(BaseModel):
+    run_id: int | None = None
+    include_state_bundle: bool = True
+
+
+def create_app(start_watchdog: bool = True) -> FastAPI:
+    """Purpose: expose the standalone workbench through API and UI."""
+
+    workbench = PlanCommissionWorkbench()
+    watchdog = RunWatchdog(workbench.store) if start_watchdog else None
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """Purpose: run stale-run monitoring for the server lifetime."""
+
+        if watchdog:
+            watchdog.start()
+        try:
+            yield
+        finally:
+            if watchdog:
+                watchdog.stop()
+
+    app = FastAPI(title="Plan Commission Workbench", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=str(PACKAGE_ROOT / "static")), name="static")
+
+    @app.get("/", response_class=HTMLResponse)
+    def run_screen(request: Request):
+        return templates.TemplateResponse(request, "run.html", {"page": "run"})
+
+    @app.get("/agenda", response_class=HTMLResponse)
+    def agenda_screen(request: Request):
+        return templates.TemplateResponse(request, "agenda.html", {"page": "agenda"})
+
+    @app.get("/applications", response_class=HTMLResponse)
+    def applications_screen(request: Request):
+        return templates.TemplateResponse(request, "applications.html", {"page": "applications"})
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review_screen(request: Request):
+        return templates.TemplateResponse(request, "review.html", {"page": "review"})
+
+    @app.get("/milwaukee", response_class=HTMLResponse)
+    def milwaukee_screen(request: Request):
+        today = dt.date.today()
+        default_from = today.replace(day=1)
+        return templates.TemplateResponse(
+            request,
+            "milwaukee.html",
+            {"page": "milwaukee", "default_from": default_from.isoformat(), "default_to": today.isoformat()},
+        )
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return {"status": "ok", "openai": workbench.openai_status()}
+
+    @app.post("/settings/openai-api-key")
+    def openai_api_key(payload: OpenAIKeyRequest) -> dict[str, Any]:
+        try:
+            return workbench.configure_openai_api_key(payload.api_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/settings/openai-api-key")
+    def clear_openai_api_key() -> dict[str, Any]:
+        return workbench.clear_openai_api_key()
+
+    @app.get("/settings/diagnostic-email")
+    def diagnostic_email_settings() -> dict[str, Any]:
+        return workbench.diagnostic_email_status()
+
+    @app.post("/settings/diagnostic-email")
+    def configure_diagnostic_email(payload: DiagnosticEmailRequest) -> dict[str, Any]:
+        return workbench.configure_diagnostic_email(payload.model_dump())
+
+    @app.post("/settings/diagnostic-email/test")
+    def test_diagnostic_email() -> dict[str, Any]:
+        try:
+            return workbench.send_test_diagnostic_email()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/settings/diagnostic-email/credential")
+    def clear_diagnostic_email_credential() -> dict[str, Any]:
+        return workbench.clear_diagnostic_email_credential()
+
+    @app.delete("/settings/secrets")
+    def clear_all_stored_secrets() -> dict[str, Any]:
+        return workbench.clear_all_stored_secrets()
+
+    @app.post("/runs/madison")
+    def run_madison(payload: MadisonRunRequest) -> dict[str, Any]:
+        try:
+            workbench.require_openai_api_key()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        run_id = workbench.create_madison_run(payload.date_from, payload.date_to, payload.request_text)
+        request = RunRequest(payload.date_from, payload.date_to, payload.request_text)
+        try:
+            return workbench.start_madison_run_worker(run_id, request)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not start run worker: {exc}") from exc
+
+    @app.post("/milwaukee-cpc/smoke-test")
+    def milwaukee_cpc_smoke_test(payload: MilwaukeeMvpRequest) -> dict[str, Any]:
+        if payload.include_llm:
+            try:
+                workbench.require_openai_api_key()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        service = MilwaukeeCpcMvpService(
+            legistar=LegistarClient("milwaukee"),
+            docling=workbench.docling,
+            llm=workbench.llm,
+            tmp_root=workbench.runtime.tmp_dir,
+        )
+        try:
+            return service.run_smoke_test(
+                date_from=payload.date_from,
+                date_to=payload.date_to,
+                max_items=payload.max_items,
+                documents_per_item=payload.documents_per_item,
+                include_text=payload.include_text,
+                include_llm=payload.include_llm,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Milwaukee MVP smoke test failed: {exc}") from exc
+
+    @app.post("/milwaukee-cpc/snapshots")
+    def save_milwaukee_cpc_snapshot(payload: MilwaukeeMvpSnapshotRequest) -> dict[str, Any]:
+        stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        path = workbench.runtime.diagnostics_dir / f"milwaukee_cpc_mvp_snapshot_{stamp}.json"
+        envelope = {
+            "created_utc": stamp,
+            "source": "milwaukee_cpc_mvp",
+            "findings": payload.findings,
+        }
+        try:
+            path.write_text(json.dumps(envelope, indent=2, default=str), encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not write Milwaukee snapshot: {exc}") from exc
+        return {"filename": path.name, "path": str(path)}
+
+    @app.get("/runs")
+    def runs() -> list[dict[str, Any]]:
+        return workbench.store.list_runs()
+
+    @app.get("/runs/{run_id}")
+    def run_detail(run_id: int) -> dict[str, Any]:
+        row = workbench.store.get_run(run_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return row
+
+    @app.get("/runs/{run_id}/events")
+    def run_events(run_id: int) -> list[dict[str, Any]]:
+        return workbench.store.list_run_events(run_id)
+
+    @app.post("/runs/{run_id}/retry")
+    def retry_run(run_id: int) -> dict[str, Any]:
+        try:
+            workbench.require_openai_api_key()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        prior = workbench.store.get_run(run_id)
+        if not prior:
+            raise HTTPException(status_code=404, detail="Run not found")
+        date_from = dt.date.fromisoformat(prior["date_from"])
+        date_to = dt.date.fromisoformat(prior["date_to"])
+        new_run_id = workbench.create_madison_run(date_from, date_to, prior.get("run_request_text"))
+        try:
+            response = workbench.start_madison_run_worker(new_run_id, RunRequest(date_from, date_to, prior.get("run_request_text")))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not start retry worker: {exc}") from exc
+        return {**response, "retry_of": run_id}
+
+    @app.get("/agenda-items")
+    def agenda_items(status: str | None = Query(default=None)) -> list[dict[str, Any]]:
+        return workbench.store.list_agenda_items(status)
+
+    @app.patch("/agenda-items/{agenda_item_id}/review")
+    def review_agenda_item(agenda_item_id: int, payload: AgendaReviewRequest) -> dict[str, Any]:
+        try:
+            return workbench.store.review_agenda_item(agenda_item_id, payload.classification, payload.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/application-extractions")
+    def application_extractions(status: str | None = Query(default=None)) -> list[dict[str, Any]]:
+        rows = workbench.store.list_application_extractions(status)
+        for row in rows:
+            row["evidence"] = workbench.store.get_field_evidence(int(row["id"]))
+        return rows
+
+    @app.patch("/application-extractions/{extraction_id}/review")
+    def review_application(extraction_id: int, payload: ReviewRequest) -> dict[str, Any]:
+        try:
+            return workbench.store.review_application(
+                extraction_id,
+                payload.status,
+                payload.corrected_fields,
+                payload.notes,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/exports")
+    def exports(payload: ExportRequest) -> dict[str, Any]:
+        try:
+            return workbench.export_rows(Path(payload.output), payload.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/exports/{export_id}/download")
+    def export_download(export_id: int) -> FileResponse:
+        row = workbench.store.get_export(export_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Export not found")
+        path = Path(row["path"])
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Export file is missing")
+        media_type = {
+            "csv": "text/csv",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }.get(str(row["format"]), "application/octet-stream")
+        return FileResponse(path, media_type=media_type, filename=path.name)
+
+    @app.post("/diagnostics/state-bundle")
+    def create_state_bundle() -> dict[str, Any]:
+        try:
+            return workbench.create_diagnostic_bundle()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not create diagnostics bundle: {exc}") from exc
+
+    @app.post("/diagnostics/email")
+    def send_diagnostics_email(payload: DiagnosticEmailSendRequest) -> dict[str, Any]:
+        try:
+            return workbench.send_diagnostic_email(payload.run_id, include_state_bundle=payload.include_state_bundle)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/diagnostics/state-bundles/{filename}")
+    def download_state_bundle(filename: str) -> FileResponse:
+        path = workbench.runtime.diagnostics_dir / filename
+        if filename != Path(filename).name or path.suffix.lower() != ".zip":
+            raise HTTPException(status_code=400, detail="Invalid diagnostics filename")
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Diagnostics bundle not found")
+        return FileResponse(path, media_type="application/zip", filename=path.name)
+
+    return app
+
+
+app = create_app()

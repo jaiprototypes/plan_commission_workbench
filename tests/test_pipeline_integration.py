@@ -1,0 +1,571 @@
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+from pathlib import Path
+
+from plan_commission_workbench import statuses
+from plan_commission_workbench.application_pipeline import ApplicationPipeline
+from plan_commission_workbench.api import PlanCommissionWorkbench
+from plan_commission_workbench.docling_adapter import DoclingTextExtractor, DoclingTextResult
+from plan_commission_workbench.exceptions import DoclingExtractionError, DownloadError
+from plan_commission_workbench.llm import LLMJsonClient
+from plan_commission_workbench.models import AttachmentRecord, AgendaClassification, AgendaSegment, DownloadedFile, EventRecord, RunRequest
+from plan_commission_workbench.runtime import WorkbenchRuntime
+from plan_commission_workbench.storage import ReviewStore
+
+
+AGENDA_URL = "https://example.test/agenda.pdf"
+SECOND_AGENDA_URL = "https://example.test/agenda-second.pdf"
+APP_URL = "https://webapi.legistar.com/v1/madison/Matters/96005/Attachments/171817/File"
+
+
+class FakeLegistar:
+    def __init__(self, include_second_event: bool = False) -> None:
+        self.downloads = 0
+        self.events = [EventRecord("27999", dt.date(2026, 6, 1), AGENDA_URL)]
+        if include_second_event:
+            self.events.append(EventRecord("28000", dt.date(2026, 6, 2), SECOND_AGENDA_URL))
+
+    def list_plan_commission_events(self, date_from, date_to, progress_callback=None):
+        if progress_callback:
+            progress_callback(f"Fake Legistar event lookup from {date_from} to {date_to}")
+        return [event for event in self.events if date_from <= event.meeting_date <= date_to]
+
+    def fetch_event_items(self, event_id, progress_callback=None):
+        if progress_callback:
+            progress_callback(f"Fake Legistar item lookup for event {event_id}")
+        if str(event_id) == "28000":
+            return [
+                {
+                    "EventItemMatterId": "97005",
+                    "EventItemMatterFile": "99001",
+                    "EventItemMatterName": "Conditional Use for a six-story office building",
+                    "EventItemMatterAttachments": [
+                        {"MatterAttachmentId": "271817", "MatterAttachmentName": "Land Use Application.pdf"}
+                    ],
+                },
+                {
+                    "EventItemMatterId": "97006",
+                    "EventItemMatterFile": "99002",
+                    "EventItemMatterName": "Planning staff report",
+                    "EventItemMatterAttachments": [],
+                },
+            ]
+        return [
+            {
+                "EventItemMatterId": "96005",
+                "EventItemMatterFile": "88001",
+                "EventItemMatterName": "Conditional Use for a 100-unit apartment building",
+                "EventItemMatterAttachments": [
+                    {"MatterAttachmentId": "171817", "MatterAttachmentName": "Land Use Application.pdf"}
+                ],
+            },
+            {
+                "EventItemMatterId": "96006",
+                "EventItemMatterFile": "88002",
+                "EventItemMatterName": "Planning staff report",
+                "EventItemMatterAttachments": [],
+            },
+        ]
+
+    def find_application_attachment(self, agenda_item, event_items):
+        from plan_commission_workbench.legistar import LegistarClient
+
+        return LegistarClient("madison").find_application_attachment(agenda_item, event_items)
+
+    def download_file(self, url: str, destination: Path) -> DownloadedFile:
+        self.downloads += 1
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = url.encode("utf-8")
+        destination.write_bytes(payload)
+        return DownloadedFile(destination, hashlib.sha256(payload).hexdigest())
+
+
+class DuplicateAttachmentLegistar(FakeLegistar):
+    """Purpose: reproduce one application PDF attached to multiple agenda hits."""
+
+    def fetch_event_items(self, event_id, progress_callback=None):
+        return []
+
+    def find_application_attachment(self, agenda_item, event_items):
+        return AttachmentRecord(
+            agenda_item_id=int(agenda_item["id"]),
+            city_item_id=str(agenda_item["city_item_id"]),
+            file_id=str(agenda_item.get("file_id") or ""),
+            attachment_id="171817",
+            source_url=APP_URL,
+            name="Land Use Application.pdf",
+        )
+
+
+class BrokenApplicationLinkLegistar(FakeLegistar):
+    """Purpose: simulate a Legistar metadata row whose file endpoint is dead."""
+
+    def __init__(self, *, status_code: int) -> None:
+        super().__init__(include_second_event=True)
+        self.status_code = status_code
+
+    def download_file(self, url: str, destination: Path) -> DownloadedFile:
+        self.downloads += 1
+        if "/Matters/96005/" in url:
+            raise DownloadError(f"Failed to download {url}: HTTP {self.status_code}", status_code=self.status_code, url=url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = url.encode("utf-8")
+        destination.write_bytes(payload)
+        return DownloadedFile(destination, hashlib.sha256(payload).hexdigest())
+
+
+class FakeDocling(DoclingTextExtractor):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_pdf_text(self, pdf_path: Path, output_dir: Path) -> str:
+        self.calls += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if pdf_path.name == "agenda_28000.pdf":
+            return """
+            1. 99001 Conditional Use for a six-story office building
+            2. 99002 Planning staff report
+            """
+        if pdf_path.name.startswith("agenda"):
+            return """
+            1. 88001 Conditional Use for a 100-unit apartment building
+            2. 88002 Planning staff report
+            """
+        return """
+            Section 3. Applicant and Project Contact
+            Applicant name Jane Applicant
+            Applicant company Applicant LLC
+            Project contact person Pat Contact
+            Project contact email pat@example.com
+            Section 4. Other
+            Section 5. Project Information
+            Project description Construct 100 dwelling units.
+            Unit count 100
+            Section 6. Signatures
+            """
+
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+        progress_callback=None,
+        timeout_seconds=None,
+    ) -> DoclingTextResult:
+        text = self.extract_pdf_text(pdf_path, output_dir)
+        mode = "vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default"
+        return DoclingTextResult(text=text, mode=mode, output_path=output_dir / f"{pdf_path.name}.{mode}.docling.txt")
+
+
+class FailingDocling(DoclingTextExtractor):
+    def extract_pdf_text(self, _pdf_path: Path, _output_dir: Path) -> str:
+        raise DoclingExtractionError("docling exploded")
+
+    def extract_pdf_text_result(self, _pdf_path: Path, _output_dir: Path, **_kwargs) -> DoclingTextResult:
+        raise DoclingExtractionError("docling exploded")
+
+
+class RetryApplicationDocling(DoclingTextExtractor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.modes: list[str] = []
+        self.timeouts: list[float | None] = []
+
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+        progress_callback=None,
+        timeout_seconds=None,
+    ) -> DoclingTextResult:
+        self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
+        self.timeouts.append(timeout_seconds)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if pdf_path.name.startswith("agenda"):
+            text = """
+            1. 88001 Conditional Use for a 100-unit apartment building
+            2. 88002 Planning staff report
+            """
+            return DoclingTextResult(text=text, mode="default", output_path=output_dir / "agenda.default.docling.txt")
+        if not force_full_page_ocr:
+            return DoclingTextResult(text="Applicant Jane Applicant Project Construct 100 units", mode="default", output_path=output_dir / "app.default.docling.txt")
+        text = """
+        Section 3. Applicant and Project Contact
+        Applicant name Jane Applicant
+        Applicant company Applicant LLC
+        Project contact person Pat Contact
+        Project contact email pat@example.com
+        Section 5. Project Information
+        Project description Construct 100 dwelling units.
+        Unit count 100
+        """
+        return DoclingTextResult(text=text, mode="full_page_ocr", output_path=output_dir / "app.full_page_ocr.docling.txt")
+
+
+class VlmApplicationDocling(RetryApplicationDocling):
+    def extract_pdf_text_result(
+        self,
+        pdf_path: Path,
+        output_dir: Path,
+        *,
+        force_full_page_ocr: bool = False,
+        use_vlm: bool = False,
+        progress_callback=None,
+        timeout_seconds=None,
+    ) -> DoclingTextResult:
+        self.modes.append("vlm" if use_vlm else "full_page_ocr" if force_full_page_ocr else "default")
+        self.timeouts.append(timeout_seconds)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if pdf_path.name.startswith("agenda"):
+            return DoclingTextResult(
+                text="1. 88001 Conditional Use for a 100-unit apartment building\n2. 88002 Planning staff report",
+                mode="default",
+                output_path=output_dir / "agenda.default.docling.txt",
+            )
+        if not use_vlm:
+            mode = "full_page_ocr" if force_full_page_ocr else "default"
+            return DoclingTextResult(
+                text="Applicant Jane Applicant Project Construct 100 units",
+                mode=mode,
+                output_path=output_dir / f"app.{mode}.docling.txt",
+            )
+        text = """
+        Section 3. Applicant and Project Contact
+        Applicant name Jane Applicant
+        Applicant company Applicant LLC
+        Project contact person Pat Contact
+        Project contact email pat@example.com
+        Section 5. Project Information
+        Project description Construct 100 dwelling units.
+        Unit count 100
+        """
+        return DoclingTextResult(text=text, mode="vlm", output_path=output_dir / "app.vlm.docling.txt")
+
+
+def responder(_system: str, user: str):
+    if '"items"' in user and "section_3_and_5_text" not in user:
+        if "97005" in user:
+            return {
+                "items": [
+                    {
+                        "city_item_id": "97005",
+                        "classification": statuses.AGENDA_HIT,
+                        "confidence": 0.94,
+                        "reason": "Office building",
+                        "evidence_snippet": "six-story office building",
+                    },
+                    {
+                        "city_item_id": "97006",
+                        "classification": statuses.NOT_TARGET_PROJECT,
+                        "confidence": 0.88,
+                        "reason": "Staff report",
+                        "evidence_snippet": "Planning staff report",
+                    },
+                ]
+            }
+        return {
+            "items": [
+                {
+                    "city_item_id": "96005",
+                    "classification": statuses.AGENDA_HIT,
+                    "confidence": 0.93,
+                    "reason": "New housing development",
+                    "evidence_snippet": "100-unit apartment building",
+                },
+                {
+                    "city_item_id": "96006",
+                    "classification": statuses.NOT_TARGET_PROJECT,
+                    "confidence": 0.88,
+                    "reason": "Staff report",
+                    "evidence_snippet": "Planning staff report",
+                },
+            ]
+        }
+    return {
+        "target_project": True,
+        "target_reason": "Multifamily housing",
+        "applicant": {
+            "name": "Jane Applicant",
+            "company": "Applicant LLC",
+            "mailing_address": "123 Main Street, Madison, WI 53703",
+        },
+        "project_contact": {"name": "Pat Contact", "email": "pat@example.com"},
+        "owner": {},
+        "section5_description": "Construct 100 dwelling units.",
+        "unit_count": 100,
+        "evidence": [{"field_name": "unit_count", "value": 100, "evidence_snippet": "Unit count 100", "confidence": 0.9}],
+    }
+
+
+def make_workbench(tmp_path, docling, legistar=None):
+    runtime = WorkbenchRuntime(project_root=tmp_path, data_dir=tmp_path / "data")
+    store = ReviewStore(runtime.db_path)
+    return PlanCommissionWorkbench(
+        runtime=runtime,
+        store=store,
+        legistar=legistar or FakeLegistar(),
+        docling=docling,
+        llm=LLMJsonClient(responder=responder),
+    )
+
+
+def test_full_mocked_run_creates_hit_and_application_then_skips_completed_work(tmp_path) -> None:
+    docling = FakeDocling()
+    workbench = make_workbench(tmp_path, docling)
+
+    first = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    second = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert first["status"] == statuses.COMPLETED
+    assert second["status"] == statuses.COMPLETED
+    assert second["agenda_total"] == 2
+    assert second["agenda_hits"] == 1
+    assert second["applications_total"] == 1
+    assert second["applications_extracted"] == 1
+    assert len(workbench.store.list_agenda_items(statuses.AGENDA_HIT)) == 1
+    assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1
+    assert docling.calls == 2
+    assert not (tmp_path / "data" / "tmp" / "run_1").exists()
+    event_stages = [event["stage"] for event in workbench.store.list_run_events(1)]
+    assert statuses.APPLICATION_DOCLING in event_stages
+    assert statuses.APPLICATION_LLM_EXTRACTING in event_stages
+
+    extraction = workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)[0]
+    workbench.store.review_application(extraction["id"], statuses.ACCEPTED, {}, None)
+    third = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert third["applications_total"] == 1
+    assert third["applications_extracted"] == 1
+    assert len(workbench.store.list_application_extractions(statuses.ACCEPTED)) == 1
+    assert docling.calls == 2
+
+
+def test_overlapping_ranges_reuse_existing_rows_and_process_new_dates(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = FakeLegistar(include_second_event=True)
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+
+    first = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 1))
+    second = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert first["agenda_total"] == 2
+    assert first["agenda_hits"] == 1
+    assert first["applications_total"] == 1
+    assert second["status"] == statuses.COMPLETED
+    assert second["agenda_total"] == 4
+    assert second["agenda_hits"] == 2
+    assert second["applications_total"] == 2
+    assert second["applications_extracted"] == 2
+    assert len(workbench.store.list_agenda_items(statuses.AGENDA_HIT)) == 2
+    assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 2
+    assert legistar.downloads == 4
+    assert docling.calls == 4
+
+
+def test_application_queue_skips_reused_attachment_across_agenda_items(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = DuplicateAttachmentLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2026, 6, 1), dt.date(2026, 6, 2), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27999",
+        file_id=None,
+        attachment_id=None,
+        source_url=AGENDA_URL,
+        content_hash="agenda-hash",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    for event_id, city_item_id, meeting_date in (
+        ("27999", "96005", dt.date(2026, 6, 1)),
+        ("28000", "97005", dt.date(2026, 6, 2)),
+    ):
+        workbench.store.upsert_agenda_item(
+            run_id,
+            source_id,
+            AgendaSegment(event_id, city_item_id, city_item_id, meeting_date, "Construct apartments"),
+            AgendaClassification(city_item_id, statuses.AGENDA_HIT, 0.95, "Housing", "apartments"),
+        )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2026, 6, 1), dt.date(2026, 6, 2)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    stages = [event["stage"] for event in workbench.store.list_run_events(run_id)]
+    assert legistar.downloads == 1
+    assert docling.calls == 1
+    assert "application_skip_source_reused" in stages
+    assert len(workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW)) == 1
+    assert len(workbench.store.list_application_extractions()) == 1
+
+
+def test_application_download_404_is_logged_unavailable_and_run_continues(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = BrokenApplicationLinkLegistar(status_code=404)
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+
+    first = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    second = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert first["status"] == statuses.COMPLETED
+    assert second["status"] == statuses.COMPLETED
+    assert legistar.downloads == 4
+    assert docling.calls == 3
+    events = workbench.store.list_run_events(1) + workbench.store.list_run_events(2)
+    stages = [event["stage"] for event in events]
+    assert statuses.APPLICATION_UNAVAILABLE in stages
+    assert "application_skip_unavailable_source" not in stages
+    assert len(workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW)) == 1
+    assert len(workbench.store.list_application_extractions()) == 1
+    with workbench.store.transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT processing_status
+            FROM source_items
+            WHERE source_kind = 'application' AND attachment_id = '171817'
+            """
+        ).fetchone()
+    assert row["processing_status"] == statuses.APPLICATION_UNAVAILABLE
+
+
+def test_application_download_500_still_fails_run(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = BrokenApplicationLinkLegistar(status_code=500)
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert result["status"] == statuses.FAILED_APPLICATION_DOWNLOAD
+    assert "HTTP 500" in result["last_error"]
+
+
+def test_docling_failure_stops_run_and_cleans_temp_files(tmp_path) -> None:
+    workbench = make_workbench(tmp_path, FailingDocling())
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+
+    assert result["status"] == statuses.FAILED_AGENDA_DOCLING
+    assert "docling exploded" in result["last_error"]
+    assert not (tmp_path / "data" / "tmp" / "run_1").exists()
+
+
+def test_application_queue_skips_contaminated_historical_agenda_hit(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = FakeLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2025, 11, 3), dt.date(2025, 11, 3), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27921",
+        file_id="90019",
+        attachment_id=None,
+        source_url="https://example.test/agenda-27921.pdf",
+        content_hash="agenda-27921",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = workbench.store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(
+            "27921",
+            "98914",
+            "90019",
+            dt.date(2025, 11, 3),
+            "Approving a Certified Survey Map. ## Secretary's Report ## Upcoming Matters include future mixed-use development.",
+        ),
+        AgendaClassification("98914", statuses.AGENDA_HIT, 1.0, "Mixed-use text", "future mixed-use development"),
+    )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2025, 11, 3), dt.date(2025, 11, 3)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    reviewed = [item for item in workbench.store.list_agenda_items(statuses.NEEDS_AGENDA_REVIEW) if item["id"] == agenda_id][0]
+    events = workbench.store.list_run_events(run_id)
+    assert reviewed["classification"] == statuses.NEEDS_AGENDA_REVIEW
+    assert legistar.downloads == 0
+    assert docling.calls == 0
+    assert any(event["stage"] == "application_skip_contaminated_agenda" for event in events)
+
+
+def test_application_queue_downgrades_public_comment_historical_hit(tmp_path) -> None:
+    docling = FakeDocling()
+    legistar = FakeLegistar()
+    workbench = make_workbench(tmp_path, docling, legistar=legistar)
+    run_id = workbench.store.create_run(dt.date(2025, 12, 1), dt.date(2025, 12, 1), None)
+    source_id = workbench.store.upsert_source_item(
+        run_id=run_id,
+        source_kind="agenda",
+        event_id="27921",
+        file_id="60306",
+        attachment_id=None,
+        source_url="https://example.test/agenda-public-comment.pdf",
+        content_hash="agenda-public-comment",
+        processing_status=statuses.AGENDA_HIT,
+    )
+    agenda_id = workbench.store.upsert_agenda_item(
+        run_id,
+        source_id,
+        AgendaSegment(
+            "27921",
+            "71173",
+            "60306",
+            dt.date(2025, 12, 1),
+            "Plan Commission Public Comment Period",
+        ),
+        AgendaClassification("71173", statuses.AGENDA_HIT, 0.8, "Public comment", "Public Comment Period"),
+    )
+
+    ApplicationPipeline(workbench.store, legistar, docling, workbench.llm).process_hits(
+        run_id,
+        RunRequest(dt.date(2025, 12, 1), dt.date(2025, 12, 1)),
+        workbench.runtime.run_tmp_dir(run_id),
+    )
+
+    downgraded = [item for item in workbench.store.list_agenda_items(statuses.NOT_TARGET_PROJECT) if item["id"] == agenda_id][0]
+    events = workbench.store.list_run_events(run_id)
+    assert downgraded["classification"] == statuses.NOT_TARGET_PROJECT
+    assert legistar.downloads == 0
+    assert docling.calls == 0
+    assert any(event["stage"] == "application_skip_non_action_agenda" for event in events)
+
+
+def test_application_docling_retries_full_page_ocr_when_sections_are_missing(tmp_path) -> None:
+    docling = RetryApplicationDocling()
+    workbench = make_workbench(tmp_path, docling)
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    stages = [event["stage"] for event in workbench.store.list_run_events(1)]
+
+    assert result["status"] == statuses.COMPLETED
+    assert docling.modes == ["default", "default", "full_page_ocr"]
+    assert docling.timeouts == [None, 45.0, None]
+    assert "application_docling_retry" in stages
+    assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1
+
+
+def test_application_docling_uses_vlm_after_default_and_ocr_miss_sections(tmp_path) -> None:
+    docling = VlmApplicationDocling()
+    workbench = make_workbench(tmp_path, docling)
+
+    result = workbench.run_madison_range(dt.date(2026, 6, 1), dt.date(2026, 6, 2))
+    stages = [event["stage"] for event in workbench.store.list_run_events(1)]
+
+    assert result["status"] == statuses.COMPLETED
+    assert docling.modes == ["default", "default", "full_page_ocr", "vlm"]
+    assert docling.timeouts == [None, 45.0, None, None]
+    assert "application_docling_vlm_retry" in stages
+    assert len(workbench.store.list_application_extractions(statuses.APPLICATION_EXTRACTED)) == 1

@@ -1,0 +1,14 @@
+- Consider downstream effects of each change and attempt to correct them initially.
+- Check for code in repo that has deprecated as a result of project evolution, remove it.
+- Dashboards should be built for elegance and simplicity.
+- Check for design clashing and write code for efficient resource usage.
+- Make all functions as small as possible with comments.
+- Assume application builds are going to be used on vanilla machines without globally installed dependencies.
+- Write code with OOP methodology.
+- Add functionality comments.
+- GitHub username renamed from "nerdi-boi" to "jaiprototypes".
+- Preserve the Windows MSIX/App Installer update contract: package name `GECG.PlanCommissionWorkbench`, publisher subject, App Installer feed URL, and signing certificate continuity must not change casually. Breaking any of those forces manual reinstall or certificate trust work on the production PC.
+- The production update feed is GitHub Releases based: stable assets live on the `pcw-windows-stable` release, and retained rollback assets live on `pcw-windows-v<MSIX_VERSION>` releases. Do not replace this with per-run Actions artifacts; Windows cannot poll those for updates.
+- Production machines must be installed from the stable `.appinstaller` feed, not by direct `.msix` install, because the `.appinstaller` file is what gives Windows the update subscription.
+- Keep `ForceUpdateFromAnyVersion=true` in the `.appinstaller` file so a bad update can be rolled back by republishing a retained previous MSIX to the stable feed.
+- Do not publish App Installer updates signed with a newly generated temporary certificate. Feed publishing requires a persistent signing PFX in GitHub Secrets so the target PC only needs certificate trust once.

@@ -1,0 +1,249 @@
+name: Build Windows Desktop Launcher
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows executable
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PCW_APPINSTALLER_URI: ${{ vars.PCW_APPINSTALLER_URI }}
+      PCW_MSIX_VERSION: ${{ vars.PCW_MSIX_VERSION }}
+      PCW_MSIX_VERSION_PREFIX: ${{ vars.PCW_MSIX_VERSION_PREFIX }}
+      PCW_MSIX_PACKAGE_URI: ${{ vars.PCW_MSIX_PACKAGE_URI }}
+      PCW_MSIX_PUBLISHER: ${{ vars.PCW_MSIX_PUBLISHER }}
+      PCW_REQUIRE_TRUSTED_SIGNATURE: ${{ vars.PCW_REQUIRE_TRUSTED_SIGNATURE }}
+      PCW_UPDATE_RELEASE_TAG: ${{ vars.PCW_UPDATE_RELEASE_TAG }}
+      PCW_DIAGNOSTIC_EMAIL_RECIPIENT: ${{ vars.PCW_DIAGNOSTIC_EMAIL_RECIPIENT }}
+      PCW_DIAGNOSTIC_SMTP_HOST: ${{ vars.PCW_DIAGNOSTIC_SMTP_HOST }}
+      PCW_DIAGNOSTIC_SMTP_PORT: ${{ vars.PCW_DIAGNOSTIC_SMTP_PORT }}
+      PCW_DIAGNOSTIC_SMTP_USERNAME: ${{ vars.PCW_DIAGNOSTIC_SMTP_USERNAME }}
+      PCW_DIAGNOSTIC_SMTP_SENDER: ${{ vars.PCW_DIAGNOSTIC_SMTP_SENDER }}
+      PCW_DIAGNOSTIC_SMTP_USE_SSL: ${{ vars.PCW_DIAGNOSTIC_SMTP_USE_SSL }}
+      PCW_DIAGNOSTIC_SMTP_USE_STARTTLS: ${{ vars.PCW_DIAGNOSTIC_SMTP_USE_STARTTLS }}
+      PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES: ${{ vars.PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES }}
+      PCW_DIAGNOSTIC_SMTP_PASSWORD: ${{ secrets.PCW_DIAGNOSTIC_SMTP_PASSWORD }}
+      PCW_SIGNING_CERTIFICATE_BASE64: ${{ secrets.PCW_SIGNING_CERTIFICATE_BASE64 }}
+      PCW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.PCW_SIGNING_CERTIFICATE_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Configure App Installer feed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function ConvertTo-MsixVersion {
+            param([string]$InputVersion)
+
+            $parts = @($InputVersion.Split("."))
+            if ($parts.Count -gt 4) {
+              throw "MSIX versions must use at most four numeric parts: $InputVersion"
+            }
+            foreach ($part in $parts) {
+              if ($part -notmatch '^\d+$') {
+                throw "MSIX version parts must be numeric: $InputVersion"
+              }
+              if ([int]$part -gt 65535) {
+                throw "MSIX version parts must be 65535 or lower: $InputVersion"
+              }
+            }
+            while ($parts.Count -lt 4) {
+              $parts += "0"
+            }
+            return $parts -join "."
+          }
+
+          $releaseTag = if ([string]::IsNullOrWhiteSpace($env:PCW_UPDATE_RELEASE_TAG)) { "pcw-windows-stable" } else { $env:PCW_UPDATE_RELEASE_TAG }
+          $appInstallerUri = if ([string]::IsNullOrWhiteSpace($env:PCW_APPINSTALLER_URI)) {
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$releaseTag/PlanCommissionWorkbench.appinstaller"
+          } else {
+            $env:PCW_APPINSTALLER_URI
+          }
+          $packageUri = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_PACKAGE_URI)) {
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$releaseTag/PlanCommissionWorkbench.msix"
+          } else {
+            $env:PCW_MSIX_PACKAGE_URI
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION)) {
+            $versionPrefix = if ([string]::IsNullOrWhiteSpace($env:PCW_MSIX_VERSION_PREFIX)) { "1.0" } else { $env:PCW_MSIX_VERSION_PREFIX }
+            if ($versionPrefix -notmatch '^\d+\.\d+$') {
+              throw "PCW_MSIX_VERSION_PREFIX must use two numeric parts, for example 1.0"
+            }
+            $runNumber = [int]$env:GITHUB_RUN_NUMBER
+            if ($runNumber -gt 65535) {
+              throw "GitHub run number $runNumber is too high for an MSIX version part"
+            }
+            $env:PCW_MSIX_VERSION = "$versionPrefix.$runNumber.0"
+          }
+          $env:PCW_MSIX_VERSION = ConvertTo-MsixVersion $env:PCW_MSIX_VERSION
+          "PCW_UPDATE_RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_APPINSTALLER_URI=$appInstallerUri" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_MSIX_PACKAGE_URI=$packageUri" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_MSIX_VERSION=$env:PCW_MSIX_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PCW_VERSION_RELEASE_TAG=pcw-windows-v$env:PCW_MSIX_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Configured App Installer feed: $appInstallerUri"
+          Write-Host "Configured MSIX package URI: $packageUri"
+          Write-Host "Configured MSIX version: $env:PCW_MSIX_VERSION"
+
+      - name: Restore MSIX signing certificate
+        if: ${{ env.PCW_SIGNING_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP "pcw-msix-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:PCW_SIGNING_CERTIFICATE_BASE64))
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, $env:PCW_SIGNING_CERTIFICATE_PASSWORD)
+          [IO.File]::WriteAllBytes("artifacts\PlanCommissionWorkbench-signing.cer", $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+          "PCW_SIGNING_CERTIFICATE_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Bake diagnostic email defaults
+        shell: pwsh
+        run: |
+          function Escape-PythonString {
+            param([string]$Value)
+            if ($null -eq $Value) { return "" }
+            return $Value.Replace("\", "\\").Replace("'", "\'")
+          }
+          function Bool-Literal {
+            param([string]$Value, [bool]$Default)
+            $cleaned = ([string]$Value).Trim().ToLowerInvariant()
+            if (@("1", "true", "yes", "on") -contains $cleaned) { return "True" }
+            if (@("0", "false", "no", "off") -contains $cleaned) { return "False" }
+            if ($Default) { return "True" }
+            return "False"
+          }
+
+          $hostValue = if ([string]::IsNullOrWhiteSpace($env:PCW_DIAGNOSTIC_SMTP_HOST)) { "smtp.gmail.com" } else { $env:PCW_DIAGNOSTIC_SMTP_HOST }
+          $portValue = if ([string]::IsNullOrWhiteSpace($env:PCW_DIAGNOSTIC_SMTP_PORT)) { "587" } else { $env:PCW_DIAGNOSTIC_SMTP_PORT }
+          if ($portValue -notmatch '^\d+$') {
+            throw "PCW_DIAGNOSTIC_SMTP_PORT must be numeric"
+          }
+          if ([int]$portValue -lt 1 -or [int]$portValue -gt 65535) {
+            throw "PCW_DIAGNOSTIC_SMTP_PORT must be between 1 and 65535"
+          }
+
+          $lines = @(
+            '"""Build-time developer diagnostic email defaults."""',
+            '',
+            "RECIPIENT = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_EMAIL_RECIPIENT)'",
+            "SMTP_HOST = '$(Escape-PythonString $hostValue)'",
+            "SMTP_PORT = $portValue",
+            "SMTP_USERNAME = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_USERNAME)'",
+            "SMTP_PASSWORD = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_PASSWORD)'",
+            "SENDER = '$(Escape-PythonString $env:PCW_DIAGNOSTIC_SMTP_SENDER)'",
+            "USE_SSL = $(Bool-Literal $env:PCW_DIAGNOSTIC_SMTP_USE_SSL $false)",
+            "USE_STARTTLS = $(Bool-Literal $env:PCW_DIAGNOSTIC_SMTP_USE_STARTTLS $true)",
+            "AUTO_EMAIL_FAILURES = $(Bool-Literal $env:PCW_DIAGNOSTIC_AUTO_EMAIL_FAILURES $false)"
+          )
+          $lines | Set-Content -Path "plan_commission_workbench\diagnostic_email_defaults.py" -Encoding UTF8
+
+      - name: Validate diagnostic email release configuration
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: pwsh
+        run: |
+          $missing = @()
+          foreach ($name in @(
+            "PCW_DIAGNOSTIC_EMAIL_RECIPIENT",
+            "PCW_DIAGNOSTIC_SMTP_USERNAME",
+            "PCW_DIAGNOSTIC_SMTP_PASSWORD"
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Missing diagnostic email release configuration: $($missing -join ', ')"
+          }
+
+      - name: Build launcher
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PCW_SIGNING_CERTIFICATE_BASE64)) {
+            .\scripts\build_windows.ps1 -CreateTestCertificate
+          } else {
+            .\scripts\build_windows.ps1
+          }
+
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          if ($env:PCW_REQUIRE_TRUSTED_SIGNATURE -eq "true") {
+            .\scripts\verify_windows_artifacts.ps1 -RequireTrustedSignature
+          } else {
+            .\scripts\verify_windows_artifacts.ps1
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlanCommissionWorkbench-windows
+          path: |
+            artifacts/PlanCommissionWorkbench-windows.zip
+            artifacts/PlanCommissionWorkbench.msix
+            artifacts/PlanCommissionWorkbench.appinstaller
+            artifacts/PlanCommissionWorkbench-test.cer
+            artifacts/PlanCommissionWorkbench-signing.cer
+            packaging/windows/Install-PlanCommissionWorkbench.ps1
+            packaging/windows/Install-PlanCommissionWorkbench.cmd
+          if-no-files-found: error
+
+      - name: Publish App Installer update feed
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.PCW_SIGNING_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = @(
+            "artifacts\PlanCommissionWorkbench-windows.zip",
+            "artifacts\PlanCommissionWorkbench.msix",
+            "artifacts\PlanCommissionWorkbench.appinstaller",
+            "packaging\windows\Install-PlanCommissionWorkbench.ps1",
+            "packaging\windows\Install-PlanCommissionWorkbench.cmd"
+          )
+          foreach ($certPath in @("artifacts\PlanCommissionWorkbench-test.cer", "artifacts\PlanCommissionWorkbench-signing.cer")) {
+            if (Test-Path $certPath) {
+              $files += $certPath
+            }
+          }
+          $versionNotes = "Windows desktop build $env:PCW_MSIX_VERSION from $env:GITHUB_SHA. Keep this release for rollback."
+          gh release view $env:PCW_VERSION_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:PCW_VERSION_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title "Plan Commission Workbench $env:PCW_MSIX_VERSION" --notes $versionNotes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create versioned release $env:PCW_VERSION_RELEASE_TAG" }
+          }
+          gh release upload $env:PCW_VERSION_RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload versioned release assets" }
+
+          $stableNotes = "Stable App Installer feed. Windows checks PlanCommissionWorkbench.appinstaller here for launch-time updates. Roll back by publishing assets from a versioned pcw-windows-v* release."
+          gh release view $env:PCW_UPDATE_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:PCW_UPDATE_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title "Plan Commission Workbench stable Windows feed" --notes $stableNotes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create stable release $env:PCW_UPDATE_RELEASE_TAG" }
+          }
+          gh release upload $env:PCW_UPDATE_RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload stable update feed assets" }
+          Write-Host "Published $env:PCW_MSIX_VERSION to $env:PCW_UPDATE_RELEASE_TAG"
+
+      - name: Explain skipped update feed publish
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.PCW_SIGNING_CERTIFICATE_BASE64 == '' }}
+        shell: pwsh
+        run: |
+          Write-Warning "Skipped App Installer feed publish because PCW_SIGNING_CERTIFICATE_BASE64 is not configured. Artifact builds still work, but auto-updates need one persistent signing certificate."

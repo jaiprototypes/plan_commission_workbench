@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Milwaukee MVP</h1>
+    <div id="health" class="status-pill">OpenAI</div>
+  </div>
+  <form id="milwaukee-form" class="mvp-form">
+    <label>
+      From
+      <input name="date_from" type="date" value="{{ default_from }}" required>
+    </label>
+    <label>
+      To
+      <input name="date_to" type="date" value="{{ default_to }}" required>
+    </label>
+    <label>
+      Candidate limit
+      <input name="max_items" type="number" value="6" min="1" max="25">
+    </label>
+    <label>
+      Initial evidence docs
+      <input name="documents_per_item" type="number" value="1" min="1" max="5">
+    </label>
+    <label class="inline-toggle mvp-toggle">
+      <input name="include_text" type="checkbox">
+      Docling text
+    </label>
+    <label class="inline-toggle mvp-toggle">
+      <input name="include_llm" type="checkbox">
+      Contact extraction
+    </label>
+    <button type="submit">Run MVP</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Results</h2>
+    <div class="panel-actions">
+      <span id="milwaukee-status" class="muted"></span>
+      <button id="save-milwaukee-snapshot" class="secondary" type="button" disabled>Save Snapshot</button>
+    </div>
+  </div>
+  <div id="milwaukee-results" class="cards"></div>
+</section>
+{% endblock %}

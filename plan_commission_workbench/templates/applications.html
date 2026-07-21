@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Applications</h1>
+    <select id="application-status">
+      <option value="">All</option>
+      <option value="application_extracted">Extracted</option>
+      <option value="accepted">Accepted</option>
+      <option value="rejected">Rejected</option>
+      <option value="needs_operator_review">Needs review</option>
+    </select>
+  </div>
+  <div id="applications-list" class="cards"></div>
+</section>
+{% endblock %}
