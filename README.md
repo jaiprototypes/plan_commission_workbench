@@ -9,6 +9,21 @@ DBMS. The customer DBMS should only import reviewed `.csv` or `.xlsx` output.
 Reviewed accepted contacts can also be exported to `.docx` Avery 5160/8160
 mailing labels for outreach.
 
+## AI-Assisted Development
+
+This submission was built with human direction and review, using **Codex with
+GPT-5.6** as a collaborative development tool. Its contribution was to help
+turn the product requirements into modular Python/FastAPI code, trace changes
+across the scrape, review, export, and browser surfaces, implement and refine
+the Milwaukee CPC module, expand the automated test coverage, and verify the
+sanitized hackathon submission.
+
+Codex/GPT-5.6 was used during development; it is **not** bundled into the
+application or used to make live project decisions. The running workbench uses
+the operator's own OpenAI API key for its extraction calls and defaults to
+`gpt-4.1-mini` (overridable with `PCW_OPENAI_MODEL`). Human operators retain
+control over source selection, review, acceptance, and export of all records.
+
 ## Setup
 
 ```bash
