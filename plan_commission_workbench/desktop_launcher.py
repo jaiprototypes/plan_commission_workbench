@@ -309,6 +309,15 @@ def main() -> None:
     """Purpose: executable entry point for PyInstaller and local smoke tests."""
 
     multiprocessing.freeze_support()
+    if "--self-test-local-ocr" in sys.argv:
+        from plan_commission_workbench.document_evidence_worker import main as evidence_main
+
+        raise SystemExit(evidence_main(["--self-test"]))
+    if "--document-evidence-worker" in sys.argv:
+        from plan_commission_workbench.document_evidence_worker import main as evidence_main
+
+        index = sys.argv.index("--document-evidence-worker")
+        raise SystemExit(evidence_main(sys.argv[index + 1:]))
     if "--docling-worker" in sys.argv:
         from plan_commission_workbench.docling_worker import main as worker_main
 

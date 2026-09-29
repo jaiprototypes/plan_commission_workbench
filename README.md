@@ -18,13 +18,16 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-Set `OPENAI_API_KEY` to a credited OpenAI API key before live runs. LLM calls
+Set `OPENAI_API_KEY` to a credited OpenAI API key before live Madison runs. LLM calls
 are required for agenda classification and application extraction. If the key is
 missing, terminal run/serve startup prompts for it when possible, and the local
 Run screen prompts in the browser. On Windows, entered keys are saved to that
 Windows user's Credential Manager and loaded on later launches. The key is not
 embedded in the executable, committed to git, written to the workbench database,
 or included in state bundles. Docling is required for live PDF text extraction.
+
+Milwaukee's experimental local reader requires no OpenAI key. See
+[Milwaukee preview](#milwaukee-preview) for the tested example.
 
 ## CLI
 
@@ -50,9 +53,54 @@ pcw serve --host 127.0.0.1 --port 8010
 
 Open `http://127.0.0.1:8010/`.
 
+## Milwaukee preview
+
+After setup, start the server directly to avoid the optional CLI API-key prompt:
+
+```bash
+python -m uvicorn plan_commission_workbench.server:app --host 127.0.0.1 --port 8010
+```
+
+Open `http://127.0.0.1:8010/milwaukee`. To reproduce the validated Everett example:
+
+1. Set both dates to **2026-06-08**.
+2. Set **Candidate limit** and **Documents per candidate** to **1**.
+3. Select **Local reading — no LLM**.
+4. Uncheck **Local OCR for scanned pages** for this embedded-text example.
+5. Click **Read documents**.
+
+Expect file **252190**, the **Exhibit A Continued** packet, and five source
+contacts: Kaeding, VJS contractor, Brian Griebl/VJS architect, Pierce, and Kapur.
+Pierce's printed phone `414.278.90200` should remain flagged. The page should
+report **0 LLM calls** and **incomplete coverage**, since this example deliberately
+limits documents and leaves visual regions unread.
+
+Use each contact's source link and **Read evidence** to check the original PDF
+page, coordinates, and text. **Save Snapshot** writes the complete result to the
+local `data/diagnostics/` directory. Previously read documents are cached; check
+**Refresh saved documents** to download and extract them again.
+
+Enable local OCR for a separate scanned-page test. On a fresh source checkout,
+prepare the local OCR models first:
+
+```bash
+python scripts/prepare_local_ocr.py
+python -m plan_commission_workbench.document_evidence_worker --self-test
+```
+
+The [implementation report](docs/milwaukee_local_reading_feasibility.md) includes
+the actual output table and limits. Runtime databases, downloaded files, and
+saved JSON snapshots are local and are not included in GitHub. Milwaukee results
+are review evidence; they are not yet part of the accepted production export.
+
+## API
+
 API endpoints:
 
 - `GET /health`
+- `GET /milwaukee`
+- `POST /milwaukee-cpc/smoke-test`
+- `POST /milwaukee-cpc/snapshots`
 - `POST /runs/madison`
 - `GET /runs`
 - `GET /runs/{run_id}`

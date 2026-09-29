@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>Milwaukee document reader</h1>
+    <div class="status-pill">Experimental</div>
+    <div id="health" class="status-pill" style="display: none">OpenAI</div>
+  </div>
+  <p class="muted">Read Legistar files and plans locally to find contact evidence. Review the source pages before using results. Candidate files are not verified projects.</p>
+  <form id="milwaukee-form" class="mvp-form">
+    <label>
+      From
+      <input name="date_from" type="date" value="{{ default_from }}" required>
+    </label>
+    <label>
+      To
+      <input name="date_to" type="date" value="{{ default_to }}" required>
+    </label>
+    <label>
+      Candidate limit
+      <input name="max_items" type="number" value="6" min="1" max="25">
+    </label>
+    <label>
+      Documents per candidate
+      <input name="documents_per_item" type="number" value="5" min="1" max="25">
+    </label>
+    <label>
+      Reading mode
+      <select name="processing_mode">
+        <option value="local" selected>Local reading — no LLM</option>
+        <option value="legacy_llm">Experimental LLM extraction</option>
+      </select>
+    </label>
+    <label class="inline-toggle mvp-toggle">
+      <input name="use_ocr" type="checkbox" checked>
+      Local OCR for scanned pages
+    </label>
+    <label class="inline-toggle mvp-toggle">
+      <input name="refresh_sources" type="checkbox">
+      Refresh saved documents
+    </label>
+    <button type="submit">Read documents</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Results</h2>
+    <div class="panel-actions">
+      <span id="milwaukee-status" class="muted"></span>
+      <button id="save-milwaukee-snapshot" class="secondary" type="button" disabled>Save Snapshot</button>
+    </div>
+  </div>
+  <div id="milwaukee-results" class="cards"></div>
+</section>
+{% endblock %}

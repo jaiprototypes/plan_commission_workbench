@@ -74,23 +74,34 @@ class LegistarClient:
     ) -> list[EventRecord]:
         """Purpose: fetch Madison Plan Commission events inside inclusive dates."""
 
+        return self.list_body_events("PLAN COMMISSION", date_from, date_to, progress_callback)
+
+    def list_body_events(
+        self,
+        body_name: str,
+        date_from: dt.date,
+        date_to: dt.date,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[EventRecord]:
+        """Purpose: fetch Legistar body events inside inclusive dates."""
+
         params = {
             "$filter": (
-                "(EventBodyName eq 'PLAN COMMISSION')"
+                f"(EventBodyName eq '{body_name}')"
                 f" and (EventDate ge datetime'{date_from.isoformat()}T00:00:00')"
                 f" and (EventDate le datetime'{date_to.isoformat()}T23:59:59')"
             ),
             "$orderby": "EventDate asc",
         }
-        self._report_progress(progress_callback, f"Fetching Madison Plan Commission events from {date_from} to {date_to}")
+        self._report_progress(progress_callback, f"Fetching {body_name} events from {date_from} to {date_to}")
         payload = self._get_json(
             f"{self.base_url}/events",
             params=params,
             progress_callback=progress_callback,
-            context="Legistar Plan Commission events",
+            context=f"Legistar {body_name} events",
         )
         raw_events = payload if isinstance(payload, list) else []
-        self._report_progress(progress_callback, f"Legistar returned {len(raw_events)} raw Plan Commission event(s)")
+        self._report_progress(progress_callback, f"Legistar returned {len(raw_events)} raw {body_name} event(s)")
         events: list[EventRecord] = []
         for index, raw in enumerate(raw_events, start=1):
             event_id = raw.get("EventId") if isinstance(raw, dict) else "unknown"
@@ -147,6 +158,8 @@ class LegistarClient:
         byte_count = 0
         content_type: str | None = None
         content_length: int | None = None
+        start = time.monotonic()
+        download_timeout = self._download_timeout_seconds()
         try:
             with self.session.get(url, stream=True, timeout=self._timeout_seconds()) as response:
                 response.raise_for_status()
@@ -154,6 +167,11 @@ class LegistarClient:
                 content_length = self._content_length(response.headers.get("Content-Length"))
                 with destination.open("wb") as fh:
                     for chunk in response.iter_content(chunk_size=1024 * 128):
+                        if time.monotonic() - start > download_timeout:
+                            raise DownloadError(
+                                f"Download timed out after {download_timeout:g} seconds: "
+                                f"{url} wrote {byte_count} bytes"
+                            )
                         if not chunk:
                             continue
                         byte_count += len(chunk)
@@ -162,6 +180,8 @@ class LegistarClient:
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
             raise DownloadError(f"Failed to download {url}: {exc}", status_code=status_code, url=url) from exc
+        except DownloadError:
+            raise
         except Exception as exc:
             raise DownloadError(f"Failed to download {url}: {exc}", url=url) from exc
         try:
@@ -270,6 +290,15 @@ class LegistarClient:
         except ValueError:
             return float(TIMEOUT_SECONDS)
         return max(5.0, value)
+
+    def _download_timeout_seconds(self) -> float:
+        """Purpose: cap slow attachment streams that keep sending tiny chunks."""
+
+        try:
+            value = float(os.getenv("PCW_LEGISTAR_DOWNLOAD_TIMEOUT_SECONDS", "120"))
+        except ValueError:
+            return 120.0
+        return max(10.0, value)
 
     def _json_attempts(self) -> int:
         """Purpose: make Legistar reconnection attempts visible and finite."""

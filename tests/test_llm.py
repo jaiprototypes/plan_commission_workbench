@@ -6,7 +6,13 @@ import pytest
 
 from plan_commission_workbench import statuses
 from plan_commission_workbench.exceptions import LLMResponseError
-from plan_commission_workbench.llm import AgendaPromptBuilder, ApplicationPromptBuilder, LLMJsonClient
+from plan_commission_workbench.llm import (
+    AgendaPromptBuilder,
+    ApplicationPromptBuilder,
+    LLMJsonClient,
+    MilwaukeePromptBuilder,
+    MilwaukeeTriagePromptBuilder,
+)
 from plan_commission_workbench.models import AgendaSegment
 
 
@@ -38,6 +44,30 @@ def test_application_prompt_requires_conventional_contact_formatting() -> None:
     assert "Use null when a contact field is blank" in system
     assert "actual email address" in user
     assert "without form labels" in user
+
+
+def test_milwaukee_prompt_does_not_assume_madison_form_sections() -> None:
+    system, user = MilwaukeePromptBuilder().build({"city_file": "252190"}, "CPC Staff Report text")
+
+    assert "Milwaukee City Plan Commission" in system
+    assert "Do not assume a Madison Land Use Application" in system
+    assert "phone numbers, and email addresses" in system
+    assert "plan/title sheets" in system
+    assert "leave missing fields null rather than blending details across companies" in system
+    assert "address-named owner LLCs" in system
+    assert "Do not silently repair damaged OCR names" in system
+    assert "developer" in user
+    assert "CPC Staff Report text" in user
+
+
+def test_milwaukee_triage_prompt_identifies_project_group_fields() -> None:
+    system, user = MilwaukeeTriagePromptBuilder().build({"city_file": "252190"}, "Staff report text")
+
+    assert "project identity" in system
+    assert "street/alley vacations" in system
+    assert "Signage-only changes" in system
+    assert "secondary_documents_needed" in user
+    assert "Staff report text" in user
 
 
 def test_agenda_llm_validation_requires_every_segment() -> None:
@@ -151,6 +181,71 @@ def test_application_llm_validation_rejects_bad_unit_count() -> None:
 
     with pytest.raises(LLMResponseError):
         client.extract_application(1, "https://example.test/app.pdf", "171817", "Section text")
+
+
+def test_milwaukee_llm_validation_normalizes_contact_payload() -> None:
+    client = LLMJsonClient(
+        responder=lambda _system, _user: {
+            "target_project": True,
+            "target_reason": "Staff report describes a multifamily development.",
+            "project_name": "The Everett Multifamily",
+            "project_address": "234 S Water Street",
+            "unit_count": "200",
+            "contacts": [
+                {
+                    "role": "developer",
+                    "name": "Jane Developer",
+                    "company": "Kaeding Development Group",
+                    "mailing_address": "123 Water Street, Milwaukee, WI 53202",
+                    "evidence_snippet": "Developer: Kaeding Development Group",
+                    "confidence": 0.84,
+                }
+            ],
+            "review_notes": ["Owner phone is missing."],
+            "evidence": [
+                {
+                    "field_name": "unit_count",
+                    "value": "200",
+                    "evidence_snippet": "200 dwelling units",
+                    "confidence": 0.9,
+                }
+            ],
+        }
+    )
+
+    extraction = client.extract_milwaukee_contacts({"city_file": "252190"}, "staff report")
+
+    assert extraction["project_name"] == "The Everett Multifamily"
+    assert extraction["unit_count"] == 200
+    assert extraction["contacts"][0]["role"] == "developer"
+    assert extraction["contacts"][0]["company"] == "Kaeding Development Group"
+    assert extraction["review_notes"] == ["Owner phone is missing."]
+
+
+def test_milwaukee_triage_validation_normalizes_project_payload() -> None:
+    client = LLMJsonClient(
+        responder=lambda _system, _user: {
+            "target_project": True,
+            "target_reason": "Staff report describes 200 multifamily units.",
+            "project_name": "The Everett Multifamily",
+            "project_address": "234 S. Water Street, Milwaukee, WI",
+            "unit_count": "200",
+            "building_type": "multifamily",
+            "tags": ["target_multifamily", "staff_report_sufficient"],
+            "secondary_documents_needed": False,
+            "secondary_document_reason": None,
+            "confidence": 0.94,
+            "evidence_snippet": "200-unit multi-family residential building",
+        }
+    )
+
+    triage = client.triage_milwaukee_staff_report({"city_file": "252190"}, "staff report")
+
+    assert triage["target_project"] is True
+    assert triage["unit_count"] == 200
+    assert triage["building_type"] == "multifamily"
+    assert triage["tags"] == ["target_multifamily", "staff_report_sufficient"]
+    assert triage["project_candidates"][0]["project_name"] == "The Everett Multifamily"
 
 
 def test_openai_responses_call_requests_json_object(monkeypatch: pytest.MonkeyPatch) -> None:

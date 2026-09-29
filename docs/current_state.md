@@ -1,5 +1,16 @@
 # Current Production State
 
+## Madison V1 Complete
+
+Madison Plan Commission is the completed v1 production module. It owns the
+Madison-specific Legistar scrape, agenda PDF classification, standardized Land
+Use Application extraction, operator review, diagnostics, state bundles, and
+accepted export flow.
+
+Future city work should not fold new source assumptions into the Madison module.
+Milwaukee CPC work will be implemented as its own module and will merge with
+Madison only at the normalized database, review, and export layer.
+
 ## Scrape Reliability
 
 The Madison Legistar scrape distinguishes durable broken attachment links from
@@ -62,3 +73,22 @@ The intended loop is:
 The package icon is a transparent Gould-style `G` mark derived from the company
 browser icon style. MSIX builds include target-size and unplated shortcut assets
 so Windows should show the `G` without a colored tile or bar behind it.
+
+## Next Work
+
+Milwaukee CPC is an experimental local document reader and is not ready for
+production. Saved candidate outputs and passing fixture tests do not establish
+reliable developer-contact extraction. Document coverage and correct association
+of company names with contact details remain the immediate priorities.
+
+The Milwaukee page now defaults to local PDF reading, optional local OCR, and
+contact selection with page coordinates. It needs no OpenAI key and makes no
+LLM calls in local mode. Compact evidence is reused from a separate SQLite
+source cache; incomplete coverage and ambiguous contact associations remain
+visible for review. Real Everett and Midtown documents and the live discovery
+path have been exercised. Results and limits are documented in
+`docs/milwaukee_local_reading_feasibility.md`.
+
+Broader source validation and an actual Windows package build must precede
+production review/export integration. The earlier implementation plan remains in
+`docs/milwaukee_cpc_implementation_plan.md`.

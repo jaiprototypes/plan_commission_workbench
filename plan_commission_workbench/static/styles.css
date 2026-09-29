@@ -139,6 +139,18 @@ h2 {
   grid-template-columns: 160px 160px minmax(220px, 1fr) auto;
 }
 
+.mvp-form {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 150px 150px 90px 90px auto auto auto;
+}
+
+.mvp-toggle {
+  align-self: center;
+  margin-bottom: 8px;
+}
+
 .settings-form {
   align-items: end;
   display: grid;
@@ -242,6 +254,20 @@ button.danger {
 
 .muted {
   color: var(--muted);
+}
+
+.mini-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mini-pill {
+  background: #eef2f5;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 8px;
 }
 
 .agenda-shortcut {
@@ -389,6 +415,17 @@ th {
   border-color: rgba(166, 107, 0, 0.55);
 }
 
+.mvp-card {
+  background: #ffffff;
+}
+
+.mvp-title {
+  font-size: 14px;
+  line-height: 1.35;
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
 .card-head {
   align-items: center;
   display: flex;
@@ -528,6 +565,24 @@ th {
   font-size: 13px;
 }
 
+.mvp-evidence-table {
+  min-width: 820px;
+}
+
+.selected-evidence td {
+  background: #f5fbf7;
+}
+
+.mvp-extraction {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.mvp-contact-table {
+  margin-top: 10px;
+}
+
 .rejected-applications {
   border-top: 1px solid var(--line);
   margin-top: 8px;
@@ -567,6 +622,7 @@ th {
 
   .grid.two,
   .run-form,
+  .mvp-form,
   .settings-form,
   .export-form,
   .fields,

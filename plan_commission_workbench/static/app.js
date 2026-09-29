@@ -1,6 +1,7 @@
 const page = document.body.dataset.page;
 let openAiKeyPromptShown = false;
 let selectedRunId = null;
+let lastMilwaukeeResult = null;
 
 function $(selector) {
   return document.querySelector(selector);
@@ -181,6 +182,410 @@ function setupRunPage() {
 async function downloadStateBundle() {
   const result = await getJson("/diagnostics/state-bundle", {method: "POST"});
   window.location.href = result.download_url;
+}
+
+function setupMilwaukeePage() {
+  // Local reading never asks for an API key, including when the page opens.
+  $("#milwaukee-form")?.addEventListener("submit", runMilwaukeeMvp);
+  $('#milwaukee-form [name="processing_mode"]')?.addEventListener("change", syncMilwaukeeMode);
+  $("#health")?.addEventListener("click", () => promptForOpenAiKey().catch((error) => alert(error.message)));
+  $("#save-milwaukee-snapshot")?.addEventListener("click", saveMilwaukeeSnapshot);
+  syncMilwaukeeMode();
+}
+
+function syncMilwaukeeMode() {
+  // Present API credentials only after the operator selects LLM extraction.
+  const legacy = $('#milwaukee-form [name="processing_mode"]')?.value === "legacy_llm";
+  const health = $("#health");
+  if (health) health.style.display = legacy ? "" : "none";
+  for (const name of ["use_ocr", "refresh_sources"]) {
+    const input = $(`#milwaukee-form [name="${name}"]`);
+    if (input) input.disabled = legacy;
+  }
+}
+
+async function runMilwaukeeMvp(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const button = event.currentTarget.querySelector("button[type='submit']");
+  const status = $("#milwaukee-status");
+  const payload = {
+    date_from: form.get("date_from"),
+    date_to: form.get("date_to"),
+    max_items: Number(form.get("max_items") || 6),
+    documents_per_item: Number(form.get("documents_per_item") || 5),
+    processing_mode: form.get("processing_mode") || "local",
+    use_ocr: Boolean(form.get("use_ocr")),
+    refresh_sources: Boolean(form.get("refresh_sources")),
+  };
+  if (button) button.disabled = true;
+  if (status) status.textContent = payload.processing_mode === "local" ? "Reading documents locally..." : "Running experimental LLM extraction...";
+  try {
+    if (payload.processing_mode === "legacy_llm") await loadHealth({prompt: true});
+    const result = await getJson("/milwaukee-cpc/smoke-test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    lastMilwaukeeResult = result;
+    renderMilwaukeeResults(result);
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    alert(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function renderMilwaukeeResults(result) {
+  const status = $("#milwaukee-status");
+  const list = $("#milwaukee-results");
+  const saveButton = $("#save-milwaukee-snapshot");
+  const local = result.processing_mode === "local";
+  if (saveButton) saveButton.disabled = false;
+  if (status) {
+    const projectText = result.project_count ? `, ${result.project_count} ${local ? "file result(s)" : "project group(s)"}` : "";
+    status.textContent = `${result.event_count || 0} event(s), ${result.item_count || 0} candidate item(s)${projectText}`;
+  }
+  if (!list) return;
+  const eventSummary = milwaukeeEventSummary(result.events || []);
+  const trackingSummary = local ? milwaukeeLocalSummary(result) : milwaukeeTrackingSummary(result.tracking_summary);
+  const projects = result.projects || [];
+  const cards = projects.length ? projects.map(local ? milwaukeeLocalCard : milwaukeeProjectCard).join("") : (result.items || []).map(milwaukeeItemCard).join("");
+  list.innerHTML = eventSummary + trackingSummary + (cards || '<p class="muted">No Milwaukee CPC candidate items found.</p>');
+}
+
+function milwaukeeLocalSummary(result) {
+  // Completeness describes document coverage, never proof that no contact exists.
+  const warnings = milwaukeeReviewNotes(result.warnings || []);
+  return `
+    <div class="notice ${result.coverage_complete ? "" : "warning"}">
+      <strong>Local reading · ${Number(result.llm_calls || 0)} LLM calls</strong>
+      <p>${result.coverage_complete ? "Document coverage complete." : "Incomplete document coverage. Some files or pages remain unread."}</p>
+      <p>Contacts are source evidence for review. Missing results do not establish that a developer contact is absent.</p>
+      ${(result.warnings || []).length ? warnings : ""}
+    </div>
+  `;
+}
+
+function milwaukeeLocalCard(project) {
+  // Show each Legistar file independently; local extraction does not verify projects.
+  const documents = project.evidence_documents || [];
+  return `
+    <article class="card mvp-card">
+      <div class="card-head">
+        <strong>File ${escapeHtml(project.city_file || project.matter_id || "")}</strong>
+        <span class="status-pill">${project.coverage_complete ? "Evidence to review" : "Incomplete coverage"}</span>
+      </div>
+      <p class="mvp-title">${escapeHtml(project.candidate_title || project.project_name || "")}</p>
+      ${project.document_selection_complete === false ? '<p class="notice warning">The document limit left additional attachments unread.</p>' : ""}
+      ${milwaukeeReviewNotes(project.extraction?.review_notes || [])}
+      ${milwaukeeContacts(project.extraction?.contacts || [])}
+      ${milwaukeeLocalDocuments(documents)}
+    </article>
+  `;
+}
+
+function milwaukeeLocalDocuments(documents) {
+  // Retain page coverage and unresolved evidence beside the original attachment.
+  const rows = documents.map((document) => {
+    const coverage = document.coverage || {};
+    const unread = coverage.unread_pages || [];
+    return `<tr>
+      <td>${escapeHtml(document.name || "")}</td>
+      <td>${Number(coverage.pages_read || 0)} / ${Number(coverage.page_count || 0)}</td>
+      <td>${Number(coverage.pages_ocr || 0)}</td>
+      <td>${coverage.coverage_complete ? "Complete" : `Incomplete${unread.length ? ` — pages ${escapeHtml(unread.join(", "))}` : ""}`}</td>
+      <td>${document.cache_hit ? "Saved reading" : "New reading"}</td>
+      <td>${milwaukeeUnresolvedBlocks(document)}</td>
+      <td>${milwaukeeSourceLink(document.source_url, null, "Open PDF")}</td>
+    </tr>`;
+  }).join("");
+  return `<details class="source-attributes" open>
+    <summary>Document coverage (${documents.length})</summary>
+    <div class="table-wrap"><table class="mvp-evidence-table">
+      <thead><tr><th>Document</th><th>Pages read</th><th>OCR pages</th><th>Coverage</th><th>Reading</th><th>Unresolved blocks</th><th>Source</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7">No documents read.</td></tr>'}</tbody>
+    </table></div>
+  </details>`;
+}
+
+function milwaukeeUnresolvedBlocks(document) {
+  // Preserve ambiguous text for review without promoting it to a named contact.
+  const blocks = document.unresolved_blocks || [];
+  if (!blocks.length) return "0";
+  return `<details><summary>${blocks.length} blocks to review</summary>${blocks.map((block) => `
+    <div class="field-block">
+      ${milwaukeeContactSource({...block, source_url: document.source_url, document_name: document.name})}
+      <p>${escapeHtml((block.review_flags || []).join(", "))}</p>
+    </div>`).join("")}</details>`;
+}
+
+function milwaukeeSourceLink(sourceUrl, page, label) {
+  // Only link web sources and preserve the PDF page for a reviewable citation.
+  if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) return "";
+  const url = page ? `${sourceUrl.split("#")[0]}#page=${Number(page)}` : sourceUrl;
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label || "Source")}</a>`;
+}
+
+async function saveMilwaukeeSnapshot() {
+  if (!lastMilwaukeeResult) {
+    alert("Run the Milwaukee MVP before saving a snapshot.");
+    return;
+  }
+  const result = await getJson("/milwaukee-cpc/snapshots", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({findings: lastMilwaukeeResult}),
+  });
+  const status = $("#milwaukee-status");
+  if (status) status.textContent = `Saved ${result.filename}`;
+  alert(`Saved Milwaukee snapshot:\n${result.path}`);
+}
+
+function milwaukeeEventSummary(events) {
+  if (!events.length) return "";
+  const rows = events.map((event) => `
+    <span class="mini-pill">${escapeHtml(formatDate(event.meeting_date))} | Event ${escapeHtml(event.event_id)}</span>
+  `).join("");
+  return `<div class="mini-pill-row">${rows}</div>`;
+}
+
+function milwaukeeTrackingSummary(summary) {
+  if (!summary) return "";
+  const rows = [
+    ["Candidate files", summary.items],
+    ["Ranked docs", summary.ranked_docs],
+    ["Extracted docs", summary.extracted_docs],
+    ["Contact docs", summary.contact_dig_docs],
+    ["Evidence rows", summary.contact_evidence_rows],
+    ["Primary contact projects", summary.primary_contact_projects],
+    ["Project-team only", summary.project_team_only_projects],
+    ["Verified no contact", summary.verified_no_contact_projects],
+    ["External leads", summary.external_enrichment_candidates],
+  ].map(([label, value]) => `<span class="mini-pill">${escapeHtml(label)}: ${Number(value || 0)}</span>`).join("");
+  return `<div class="mini-pill-row">${rows}</div>`;
+}
+
+function milwaukeeItemCard(item) {
+  return `
+    <article class="card mvp-card">
+      <div class="card-head">
+        <strong>${escapeHtml(formatDate(item.meeting_date))} | File ${escapeHtml(item.city_file || item.matter_id)}</strong>
+        <span class="status-pill">Score ${Number(item.candidate_score || 0)}</span>
+      </div>
+      <p class="mvp-title">${escapeHtml(item.title)}</p>
+      <p class="muted">${escapeHtml(item.candidate_reason)}</p>
+      ${milwaukeeDocuments(item.evidence_documents || [], "Evidence documents")}
+      ${milwaukeeExtraction(item.extraction)}
+    </article>
+  `;
+}
+
+function milwaukeeProjectCard(project) {
+  const tags = (project.tags || []).map((tag) => `<span class="mini-pill">${escapeHtml(tag)}</span>`).join("");
+  const related = (project.related_files || []).map((file) => `
+    <tr>
+      <td>${escapeHtml(formatDate(file.meeting_date))}</td>
+      <td>${escapeHtml(file.city_file || file.matter_id)}</td>
+      <td>${Number(file.score || 0)}</td>
+      <td>${escapeHtml(file.title || "")}</td>
+    </tr>
+  `).join("");
+  return `
+    <article class="card mvp-card">
+      <div class="card-head">
+        <strong>${escapeHtml(project.project_name || "Unnamed project")}</strong>
+        <span class="status-pill">${project.target_project === true ? "Target" : project.target_project === false ? "Not target" : "Review"}</span>
+      </div>
+      <div class="fields">
+        <div class="field-block">
+          <h3>Project</h3>
+          <p>${escapeHtml(project.project_address || "No project address")}</p>
+          <p>Units: ${escapeHtml(project.unit_count ?? "")}</p>
+          <p>${escapeHtml(project.building_type || "")}</p>
+        </div>
+        <div class="field-block">
+          <h3>Decision</h3>
+          <p>${escapeHtml(project.target_reason || "")}</p>
+          <p>Confidence: ${Number(project.confidence || 0).toFixed(2)}</p>
+        </div>
+        <div class="field-block">
+          <h3>Tags</h3>
+          <div class="mini-pill-row">${tags || '<span class="muted">No tags</span>'}</div>
+        </div>
+      </div>
+      ${milwaukeeExtraction(project.extraction)}
+      ${milwaukeeContactSearch(project.contact_search_verification)}
+      ${milwaukeeExternalEnrichment(project.external_enrichment_candidates || [])}
+      ${milwaukeeDocuments(project.contact_dig_documents || [], "Contact dig documents")}
+      <details class="source-attributes" open>
+        <summary>Related CPC actions (${project.item_count || 0})</summary>
+        <div class="table-wrap">
+          <table class="mvp-evidence-table">
+            <thead><tr><th>Date</th><th>File</th><th>Score</th><th>Title</th></tr></thead>
+            <tbody>${related}</tbody>
+          </table>
+        </div>
+      </details>
+    </article>
+  `;
+}
+
+function milwaukeeExternalEnrichment(candidates) {
+  if (!candidates.length) return "";
+  const rows = candidates.map((candidate) => `
+    <tr>
+      <td>${escapeHtml(candidate.role || "")}</td>
+      <td>${escapeHtml(candidate.name || "")}</td>
+      <td>${escapeHtml(candidate.company || "")}</td>
+      <td>${escapeHtml(candidate.reason || "")}</td>
+    </tr>
+  `).join("");
+  return `
+    <details class="source-attributes" open>
+      <summary>External enrichment candidates (${candidates.length})</summary>
+      <div class="table-wrap">
+        <table class="mvp-evidence-table">
+          <thead><tr><th>Role</th><th>Name</th><th>Company</th><th>Reason</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function milwaukeeContactSearch(verification) {
+  if (!verification) return "";
+  const documents = verification.checked_documents || [];
+  const rows = documents.map((document) => `
+    <tr>
+      <td>${escapeHtml(document.document_role || "")}</td>
+      <td>${escapeHtml(document.document_name || "")}</td>
+      <td>${escapeHtml(document.checked_result || "")}</td>
+      <td>${Number(document.phone_signal_count || 0)}</td>
+      <td>${Number(document.email_signal_count || 0)}</td>
+      <td>${Number(document.city_boilerplate_phone_count || 0)}</td>
+      <td>${escapeHtml(document.text_chars || "")}</td>
+    </tr>
+  `).join("");
+  return `
+    <details class="source-attributes" open>
+      <summary>Contact search: ${escapeHtml(verification.status || "unknown")} (${Number(verification.checked_document_count || 0)} docs)</summary>
+      <div class="table-wrap">
+        <table class="mvp-evidence-table">
+          <thead><tr><th>Pass</th><th>Document</th><th>Result</th><th>Phones</th><th>Emails</th><th>City phones</th><th>Text</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="7" class="muted">No checked documents.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function milwaukeeDocuments(documents, label) {
+  if (!documents.length) return '<p class="muted">No high-signal evidence documents ranked.</p>';
+  const rows = documents.map((document) => `
+    <tr class="${document.selected ? "selected-evidence" : ""}">
+      <td>${document.selected ? "Yes" : ""}</td>
+      <td>${escapeHtml(document.name)}</td>
+      <td>${Number(document.score ?? document.contact_dig_score ?? 0)}</td>
+      <td>${escapeHtml(document.reason || document.contact_dig_reason || "")}</td>
+      <td>${escapeHtml(document.text_chars || "")}</td>
+      <td>${document.source_url ? `<a href="${escapeHtml(document.source_url)}" target="_blank" rel="noreferrer">Open</a>` : ""}</td>
+    </tr>
+    ${document.error ? `<tr><td></td><td colspan="5" class="fail">${escapeHtml(document.error)}</td></tr>` : ""}
+  `).join("");
+  return `
+    <details class="source-attributes" open>
+      <summary>${escapeHtml(label || "Evidence documents")} (${documents.length})</summary>
+      <div class="table-wrap">
+        <table class="mvp-evidence-table">
+          <thead><tr><th>Use</th><th>Document</th><th>Score</th><th>Reason</th><th>Text</th><th>URL</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function milwaukeeExtraction(extraction) {
+  if (!extraction) return "";
+  if (extraction.error) return `<div class="notice warning"><strong>Extraction</strong>${escapeHtml(extraction.error)}</div>`;
+  return `
+    <div class="mvp-extraction">
+      <div class="fields">
+        <div class="field-block">
+          <h3>Project</h3>
+          <p>${escapeHtml(extraction.project_name || "No project name")}</p>
+          <p>${escapeHtml(extraction.project_address || "No project address")}</p>
+          <p>Units: ${escapeHtml(extraction.unit_count ?? "")}</p>
+        </div>
+        <div class="field-block">
+          <h3>Target</h3>
+          <p>${escapeHtml(extraction.target_project === true ? "Yes" : extraction.target_project === false ? "No" : "Unknown")}</p>
+          <p>${escapeHtml(extraction.target_reason || "")}</p>
+        </div>
+        <div class="field-block">
+          <h3>Review</h3>
+          ${milwaukeeReviewNotes(extraction.review_notes || [])}
+        </div>
+      </div>
+      ${milwaukeeContacts(extraction.contacts || [])}
+      ${milwaukeeEvidence(extraction.evidence || [])}
+    </div>
+  `;
+}
+
+function milwaukeeReviewNotes(notes) {
+  if (!notes.length) return '<p class="muted">No notes</p>';
+  return notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("");
+}
+
+function milwaukeeContacts(contacts) {
+  if (!contacts.length) return '<p class="muted">No contacts extracted.</p>';
+  const rows = contacts.map((contact) => `
+    <tr>
+      <td>${escapeHtml(contact.role)}${contact.source_role ? `<br><span class="muted">Source: ${escapeHtml(contact.source_role)}</span>` : ""}</td>
+      <td>${escapeHtml(contact.name || "")}</td>
+      <td>${escapeHtml(contact.company || "")}</td>
+      <td>${escapeHtml(contact.mailing_address || "")}</td>
+      <td>${escapeHtml(contact.phone || "")}</td>
+      <td>${escapeHtml(contact.email || "")}</td>
+      <td>${escapeHtml(contact.website || "")}</td>
+      <td>${milwaukeeContactSource(contact)}</td>
+      <td>${escapeHtml(contact.extraction_method || "LLM")}</td>
+      <td>${escapeHtml((contact.review_flags || []).join(", "))}</td>
+    </tr>
+  `).join("");
+  return `
+    <div class="table-wrap mvp-contact-table">
+      <table>
+        <thead><tr><th>Role</th><th>Name</th><th>Company</th><th>Address</th><th>Phone</th><th>Email</th><th>Website</th><th>Source evidence</th><th>Method</th><th>Review flags</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function milwaukeeContactSource(contact) {
+  // Coordinates refer to PDF points and allow operators to inspect the exact block.
+  const page = contact.pdf_page ? `Page ${Number(contact.pdf_page)}` : "";
+  const label = [contact.document_name, page].filter(Boolean).join(" · ") || "Source";
+  const link = milwaukeeSourceLink(contact.source_url, contact.pdf_page, label);
+  const bbox = Array.isArray(contact.bbox) ? contact.bbox.map((value) => Number(value).toFixed(1)).join(", ") : "";
+  return `${link || escapeHtml(page)}${bbox ? `<p class="muted">PDF box: ${escapeHtml(bbox)}</p>` : ""}
+    ${contact.evidence_snippet ? `<details><summary>Read evidence</summary><p>${escapeHtml(contact.evidence_snippet)}</p></details>` : ""}`;
+}
+
+function milwaukeeEvidence(evidence) {
+  if (!evidence.length) return "";
+  const rows = evidence.map(sourceAttributeRow).join("");
+  return `
+    <details class="source-attributes">
+      <summary>Field evidence (${evidence.length})</summary>
+      <div class="table-wrap"><table><tbody>${rows}</tbody></table></div>
+    </details>
+  `;
 }
 
 async function loadAgenda() {
@@ -581,6 +986,7 @@ async function postExport(output) {
 }
 
 if (page === "run") setupRunPage();
+if (page === "milwaukee") setupMilwaukeePage();
 if (page === "agenda") {
   loadAgenda().catch(console.error);
   $("#agenda-status")?.addEventListener("change", () => loadAgenda().catch(console.error));

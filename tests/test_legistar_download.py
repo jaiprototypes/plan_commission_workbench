@@ -45,6 +45,14 @@ class FakeHttpErrorResponse(FakeResponse):
         raise requests.HTTPError(f"{self.status_code} Client Error", response=self)
 
 
+class SlowStreamingResponse(FakeResponse):
+    """Purpose: mimic a server that keeps a download alive too long."""
+
+    def iter_content(self, chunk_size: int):
+        yield b"%PDF-1.7\n"
+        yield b"body\n"
+
+
 class FakeSession:
     """Purpose: provide deterministic HTTP bytes without network access."""
 
@@ -122,6 +130,18 @@ def test_download_file_rejects_truncated_response(tmp_path: Path) -> None:
     client = _client_for(b"%PDF-1.7\n", {"Content-Type": "application/pdf", "Content-Length": "999"})
 
     with pytest.raises(DownloadError, match="truncated"):
+        client.download_file("https://example.test/agenda.pdf", tmp_path / "agenda.pdf")
+
+
+def test_download_file_times_out_slow_stream(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    response = SlowStreamingResponse(b"", {"Content-Type": "application/pdf"})
+    client = LegistarClient("madison", session=FakeSession(response))
+    ticks = iter([0.0, 1.0, 11.5])
+
+    monkeypatch.setenv("PCW_LEGISTAR_DOWNLOAD_TIMEOUT_SECONDS", "10")
+    monkeypatch.setattr("plan_commission_workbench.legistar.time.monotonic", lambda: next(ticks))
+
+    with pytest.raises(DownloadError, match="Download timed out after 10 seconds"):
         client.download_file("https://example.test/agenda.pdf", tmp_path / "agenda.pdf")
 
 

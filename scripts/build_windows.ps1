@@ -491,6 +491,7 @@ function Test-StagedExecutable {
         throw "Expected staged executable was not created: $stagedExe"
     }
     Invoke-ExecutableSelfTest $stagedExe "--self-test-docling" "Staged MSIX executable self-test"
+    Invoke-ExecutableSelfTest $stagedExe "--self-test-local-ocr" "Staged MSIX local scanned-page OCR self-test"
     Invoke-ExecutableSelfTest $stagedExe "--self-test-runtime-imports" "Staged MSIX runtime import self-test"
 }
 
@@ -620,6 +621,10 @@ Assert-LastExitCode "editable test install"
 Assert-LastExitCode "PyInstaller install"
 $TorchSourceDir = Get-PythonModuleDirectory "torch"
 
+# Purpose: include local OCR models before freezing; target PCs need no downloads.
+& $Python scripts/prepare_local_ocr.py
+Assert-LastExitCode "local OCR model preparation"
+
 if (-not $SkipTests) {
     & $Python -m pytest
     Assert-LastExitCode "pytest"
@@ -654,8 +659,10 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     --collect-all "pypdfium2" `
     --collect-all "pypdfium2_raw" `
     --collect-all "rapidocr" `
+    --collect-all "onnxruntime" `
     --collect-all "openai" `
     --hidden-import "plan_commission_workbench.docling_worker" `
+    --hidden-import "plan_commission_workbench.document_evidence_worker" `
     --hidden-import "plan_commission_workbench.run_worker" `
     --hidden-import "plan_commission_workbench.server" `
     --hidden-import "uvicorn.logging" `
@@ -671,6 +678,7 @@ if (-not (Test-Path $ExePath)) {
 }
 
 Invoke-ExecutableSelfTest $ExePath "--self-test-docling" "Windows executable Docling self-test"
+Invoke-ExecutableSelfTest $ExePath "--self-test-local-ocr" "Windows executable local scanned-page OCR self-test"
 Invoke-ExecutableSelfTest $ExePath "--self-test-runtime-imports" "Windows executable runtime import self-test"
 
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $AppDir "README.md")

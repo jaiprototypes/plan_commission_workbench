@@ -133,6 +133,125 @@ class ApplicationPromptBuilder:
         return system, user
 
 
+class MilwaukeePromptBuilder:
+    """Purpose: build Milwaukee CPC evidence-bundle extraction prompts."""
+
+    def build(self, item_context: dict[str, Any], evidence_bundle: str) -> tuple[str, str]:
+        """Purpose: create one JSON-only Milwaukee CPC contact prompt."""
+
+        system = (
+            "You extract potential client contact fields from Milwaukee City Plan Commission evidence. "
+            "The input may combine CPC staff reports, Exhibit A, project narratives, affidavits, plans, "
+            "and similar attachments. Do not assume a Madison Land Use Application or fixed form sections. "
+            "Find the best available equivalents for applicant, owner, developer, and project contact. "
+            "Prefer developer, applicant, and owner entities over public commenters or city staff. "
+            "Treat address-named owner LLCs, such as 123 Main Street LLC, as ownership evidence only unless "
+            "the document provides a real person, mailing address, phone, or email for that entity. "
+            "When affidavits, narratives, or exhibits are included, search them specifically for person names, "
+            "mailing addresses, phone numbers, and email addresses that were missing from the staff report. "
+            "When plan/title sheets are included, extract owner, general contractor, architect, structural engineer, "
+            "and civil engineer contacts only when they are tied to the project team. "
+            "Do not attach a mailing address, phone, email, website, or header block from one company to a different "
+            "company. If a title sheet lists Pierce, VJS, Kapur, the developer, or another project-team firm in "
+            "separate blocks, keep each block as its own contact and leave missing fields null rather than blending "
+            "details across companies. "
+            "Do not silently repair damaged OCR names from signature lines; if the source text is garbled, "
+            "keep confidence low and add a review note. "
+            "Use null for missing fields, and keep contact values clean without document labels. "
+            "Set target_project true only for multifamily housing, mixed-use buildings with residential/commercial "
+            "space, office buildings, or similar development leads. Return only valid JSON."
+        )
+        user = json.dumps(
+            {
+                "required_schema": {
+                    "target_project": "boolean|null",
+                    "target_reason": "short string explaining target decision",
+                    "project_name": "string|null",
+                    "project_address": "string|null",
+                    "unit_count": "integer|null",
+                    "contacts": [
+                        {
+                            "role": "applicant|owner|developer|project_contact|architect|contractor|other",
+                            **CONTACT_SCHEMA,
+                            "evidence_snippet": "short text support",
+                            "confidence": "0.0-1.0",
+                        }
+                    ],
+                    "review_notes": ["short strings for missing or ambiguous fields"],
+                    "evidence": [
+                        {
+                            "field_name": "string",
+                            "value": "string|integer|null",
+                            "evidence_snippet": "short text support",
+                            "confidence": "0.0-1.0",
+                        }
+                    ],
+                },
+                "item_context": item_context,
+                "evidence_bundle": evidence_bundle,
+            },
+            indent=2,
+        )
+        return system, user
+
+
+class MilwaukeeTriagePromptBuilder:
+    """Purpose: build Milwaukee CPC staff-report triage prompts."""
+
+    def build(self, item_context: dict[str, Any], staff_report_text: str) -> tuple[str, str]:
+        """Purpose: create one JSON-only project identity and tag prompt."""
+
+        system = (
+            "You triage Milwaukee City Plan Commission staff report text before deeper extraction. "
+            "Identify whether the item describes a target building lead: multifamily housing, "
+            "mixed-use with residential/commercial space, or an office building. "
+            "Return a stable project identity so multiple CPC files for the same building can be grouped. "
+            "Do not treat street/alley vacations, self-storage/data-processing uses, industrial zoning, "
+            "minor modifications, or exterior alterations to existing duplex/single-building residential structures "
+            "as target leads unless the staff report itself identifies a target new building. Signage-only changes, "
+            "procedural notification rules, use-permission changes, and existing-building exterior work are non-target. "
+            "Return only valid JSON."
+        )
+        user = json.dumps(
+            {
+                "required_schema": {
+                    "target_project": "boolean|null",
+                    "target_reason": "short target decision reason",
+                    "project_name": "string|null",
+                    "project_address": "string|null",
+                    "unit_count": "integer|null",
+                    "building_type": "multifamily|mixed_use|office|non_target|unknown",
+                    "tags": [
+                        "target_multifamily|target_mixed_use|target_office|not_target|needs_secondary_documents|staff_report_sufficient|same_building_possible"
+                    ],
+                    "secondary_documents_needed": "boolean",
+                    "secondary_document_reason": "string|null",
+                    "confidence": "0.0-1.0",
+                    "evidence_snippet": "short text support",
+                    "project_candidates": [
+                        {
+                            "target_project": "boolean|null",
+                            "target_reason": "short target decision reason",
+                            "project_name": "string|null",
+                            "project_address": "string|null",
+                            "unit_count": "integer|null",
+                            "building_type": "multifamily|mixed_use|office|non_target|unknown",
+                            "tags": ["short tag strings"],
+                            "secondary_documents_needed": "boolean",
+                            "secondary_document_reason": "string|null",
+                            "confidence": "0.0-1.0",
+                            "evidence_snippet": "short text support",
+                        }
+                    ],
+                },
+                "item_context": item_context,
+                "staff_report_text": staff_report_text,
+            },
+            indent=2,
+        )
+        return system, user
+
+
 CONTACT_SCHEMA = {
     "name": "clean conventional person name string|null, without form labels",
     "company": "clean conventional company name string|null, without form labels",
@@ -152,6 +271,8 @@ class LLMJsonClient:
         self.max_retries = max(0, _env_int("PCW_OPENAI_MAX_RETRIES", 2))
         self.agenda_prompts = AgendaPromptBuilder()
         self.application_prompts = ApplicationPromptBuilder()
+        self.milwaukee_prompts = MilwaukeePromptBuilder()
+        self.milwaukee_triage_prompts = MilwaukeeTriagePromptBuilder()
 
     def status(self) -> dict[str, Any]:
         """Purpose: expose UI health for OpenAI configuration."""
@@ -192,6 +313,20 @@ class LLMJsonClient:
         system, user = self.application_prompts.build(clipped_text)
         payload = self._request_json(system, user)
         return self._validate_application(agenda_item_id, source_url, attachment_id, payload)
+
+    def extract_milwaukee_contacts(self, item_context: dict[str, Any], evidence_bundle: str) -> dict[str, Any]:
+        """Purpose: run and validate Milwaukee CPC contact extraction JSON."""
+
+        system, user = self.milwaukee_prompts.build(item_context, evidence_bundle)
+        payload = self._request_json(system, user)
+        return self._validate_milwaukee_contacts(payload)
+
+    def triage_milwaukee_staff_report(self, item_context: dict[str, Any], staff_report_text: str) -> dict[str, Any]:
+        """Purpose: run and validate Milwaukee staff-report project triage JSON."""
+
+        system, user = self.milwaukee_triage_prompts.build(item_context, staff_report_text)
+        payload = self._request_json(system, user)
+        return self._validate_milwaukee_triage(payload)
 
     def _request_json(self, system: str, user: str) -> dict[str, Any]:
         """Purpose: request JSON through an injectable or OpenAI-backed client."""
@@ -340,6 +475,94 @@ class LLMJsonClient:
             target_reason=target_reason,
             evidence=evidence,
         )
+
+    def _validate_milwaukee_contacts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: validate the MVP Milwaukee extraction payload."""
+
+        contacts = payload.get("contacts") or []
+        if not isinstance(contacts, list):
+            raise LLMResponseError("Milwaukee LLM JSON contacts must be a list")
+        notes = payload.get("review_notes") or []
+        if not isinstance(notes, list):
+            raise LLMResponseError("Milwaukee LLM JSON review_notes must be a list")
+        evidence = payload.get("evidence") or []
+        if not isinstance(evidence, list):
+            raise LLMResponseError("Milwaukee LLM JSON evidence must be a list")
+        return {
+            "target_project": self._bool_or_none(payload.get("target_project")),
+            "target_reason": self._text_or_none(payload.get("target_reason")),
+            "project_name": self._text_or_none(payload.get("project_name")),
+            "project_address": self._text_or_none(payload.get("project_address")),
+            "unit_count": self._int_or_none(payload.get("unit_count")),
+            "contacts": [self._milwaukee_contact(item) for item in contacts if isinstance(item, dict)],
+            "review_notes": [str(item).strip()[:500] for item in notes if str(item).strip()],
+            "evidence": [self._evidence(item).__dict__ for item in evidence if isinstance(item, dict)],
+        }
+
+    def _validate_milwaukee_triage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: validate the MVP staff-report triage payload."""
+
+        candidates = payload.get("project_candidates")
+        if candidates is None:
+            candidates = [payload]
+        if not isinstance(candidates, list):
+            raise LLMResponseError("Milwaukee triage JSON project_candidates must be a list")
+        normalized = [self._milwaukee_project_candidate(item) for item in candidates if isinstance(item, dict)]
+        primary = normalized[0] if normalized else self._milwaukee_project_candidate(payload)
+        return primary | {"project_candidates": normalized or [primary]}
+
+    def _milwaukee_project_candidate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: normalize one project candidate from a staff report."""
+
+        tags = raw.get("tags") or []
+        if not isinstance(tags, list):
+            raise LLMResponseError("Milwaukee triage JSON tags must be a list")
+        return {
+            "target_project": self._bool_or_none(raw.get("target_project")),
+            "target_reason": self._text_or_none(raw.get("target_reason")),
+            "project_name": self._text_or_none(raw.get("project_name")),
+            "project_address": self._text_or_none(raw.get("project_address")),
+            "unit_count": self._int_or_none(raw.get("unit_count")),
+            "building_type": self._milwaukee_building_type(raw.get("building_type")),
+            "tags": [str(item).strip().lower()[:80] for item in tags if str(item).strip()],
+            "secondary_documents_needed": self._bool_or_false(raw.get("secondary_documents_needed")),
+            "secondary_document_reason": self._text_or_none(raw.get("secondary_document_reason")),
+            "confidence": self._confidence(raw.get("confidence")),
+            "evidence_snippet": str(raw.get("evidence_snippet") or "")[:500],
+        }
+
+    def _milwaukee_building_type(self, value: Any) -> str:
+        """Purpose: constrain triage building labels to known MVP buckets."""
+
+        normalized = str(value or "unknown").strip().lower()
+        return normalized if normalized in {"multifamily", "mixed_use", "office", "non_target", "unknown"} else "unknown"
+
+    def _bool_or_false(self, value: Any) -> bool:
+        """Purpose: parse optional triage booleans with a conservative default."""
+
+        if value in (None, ""):
+            return False
+        parsed = self._bool_or_none(value)
+        return bool(parsed)
+
+    def _milwaukee_contact(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Purpose: normalize one Milwaukee contact object for the MVP UI."""
+
+        contact = self._contact(raw)
+        role = str(raw.get("role") or "other").strip().lower()
+        supported_roles = {"applicant", "owner", "developer", "project_contact", "architect", "contractor", "other"}
+        if role not in supported_roles:
+            role = "other"
+        return {
+            "role": role,
+            "name": contact.name,
+            "company": contact.company,
+            "mailing_address": contact.mailing_address,
+            "phone": contact.phone,
+            "email": contact.email,
+            "evidence_snippet": str(raw.get("evidence_snippet") or "")[:500],
+            "confidence": self._confidence(raw.get("confidence")),
+        }
 
     def _contact(self, raw: Any) -> ContactFields:
         """Purpose: validate a repeated contact object."""

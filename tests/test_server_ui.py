@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import datetime as dt
+import json
 import zipfile
 
 from fastapi.testclient import TestClient
 
 from plan_commission_workbench import statuses
+from plan_commission_workbench import server
 from plan_commission_workbench.api import PlanCommissionWorkbench
 from plan_commission_workbench.models import AgendaClassification, AgendaSegment
 from plan_commission_workbench.runtime import WorkbenchRuntime
@@ -18,11 +20,128 @@ from plan_commission_workbench.storage import ReviewStore
 def test_ui_pages_render_without_template_errors() -> None:
     client = TestClient(create_app(start_watchdog=False))
 
-    for path in ("/", "/agenda", "/applications", "/review"):
+    for path in ("/", "/agenda", "/applications", "/review", "/milwaukee"):
         response = client.get(path)
 
         assert response.status_code == 200
         assert "Plan Commission Workbench" in response.text
+
+
+def test_milwaukee_form_uses_clear_scrape_limit_labels() -> None:
+    client = TestClient(create_app(start_watchdog=False))
+
+    response = client.get("/milwaukee")
+
+    assert response.status_code == 200
+    assert "Candidate limit" in response.text
+    assert "Documents per candidate" in response.text
+    assert '<option value="local" selected>' in response.text
+    assert "Experimental LLM extraction" in response.text
+    assert 'name="use_ocr" type="checkbox" checked' in response.text
+
+
+def test_milwaukee_local_reading_needs_no_openai_key(monkeypatch, tmp_path) -> None:
+    """Purpose: prove both default and explicit local requests bypass the LLM."""
+
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = []
+
+    def forbid_key_check(_self) -> None:
+        raise AssertionError("Local reading must not check OpenAI credentials")
+
+    class LocalService:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_local_test(self, **kwargs):
+            calls.append(kwargs)
+            return {"processing_mode": "local", "llm_calls": 0, "projects": []}
+
+        def run_smoke_test(self, **_kwargs):
+            raise AssertionError("Local reading must not invoke legacy extraction")
+
+    monkeypatch.setattr(PlanCommissionWorkbench, "require_openai_api_key", forbid_key_check)
+    monkeypatch.setattr(server, "MilwaukeeCpcMvpService", LocalService)
+    client = TestClient(create_app(start_watchdog=False))
+    dates = {"date_from": "2026-06-01", "date_to": "2026-06-30"}
+
+    response = client.post("/milwaukee-cpc/smoke-test", json=dates)
+
+    assert response.status_code == 200
+    assert response.json()["llm_calls"] == 0
+    assert calls[0] == {
+        "date_from": dt.date(2026, 6, 1),
+        "date_to": dt.date(2026, 6, 30),
+        "max_items": 6,
+        "documents_per_item": 5,
+        "use_ocr": True,
+        "refresh_sources": False,
+    }
+    response = client.post(
+        "/milwaukee-cpc/smoke-test",
+        json={**dates, "processing_mode": "local", "use_ocr": False, "refresh_sources": True, "include_llm": True},
+    )
+
+    assert response.status_code == 200
+    assert calls[1]["use_ocr"] is False
+    assert calls[1]["refresh_sources"] is True
+
+
+def test_milwaukee_legacy_llm_requires_key_and_explicit_mode(monkeypatch, tmp_path) -> None:
+    """Purpose: gate experimental LLM extraction before starting document work."""
+
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    calls = []
+
+    def missing_key(_self) -> None:
+        raise RuntimeError("OpenAI key required")
+
+    class LegacyService:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("created")
+
+        def run_smoke_test(self, **kwargs):
+            calls.append(kwargs)
+            return {"projects": []}
+
+        def run_local_test(self, **_kwargs):
+            raise AssertionError("Legacy mode should use its own extraction path")
+
+    monkeypatch.setattr(PlanCommissionWorkbench, "require_openai_api_key", missing_key)
+    monkeypatch.setattr(server, "MilwaukeeCpcMvpService", LegacyService)
+    client = TestClient(create_app(start_watchdog=False))
+    payload = {"date_from": "2026-06-01", "date_to": "2026-06-30", "processing_mode": "legacy_llm"}
+
+    response = client.post("/milwaukee-cpc/smoke-test", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "OpenAI key required"
+    assert calls == []
+    monkeypatch.setattr(PlanCommissionWorkbench, "require_openai_api_key", lambda _self: calls.append("key checked"))
+
+    response = client.post("/milwaukee-cpc/smoke-test", json=payload)
+
+    assert response.status_code == 200
+    assert calls[:2] == ["key checked", "created"]
+    assert calls[2]["include_llm"] is True
+    assert calls[2]["include_text"] is True
+    invalid = client.post("/milwaukee-cpc/smoke-test", json={**payload, "processing_mode": "unknown"})
+    assert invalid.status_code == 422
+
+
+def test_milwaukee_js_renders_tracking_summary() -> None:
+    script = (PACKAGE_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "milwaukeeTrackingSummary" in script
+    assert "Candidate files" in script
+    assert "Evidence rows" in script
+    assert "Primary contact projects" in script
+    assert "Project-team only" in script
+    assert "Verified no contact" in script
+    assert "External leads" in script
+    assert "milwaukeeContactSearch" in script
+    assert "milwaukeeExternalEnrichment" in script
 
 
 def test_applications_js_hides_rejected_rows_in_dropdown() -> None:
@@ -177,6 +296,19 @@ def test_state_bundle_endpoint_returns_zip(monkeypatch, tmp_path) -> None:
     with zipfile.ZipFile(zip_path) as archive:
         assert "workbench.db" in archive.namelist()
         assert "manifest.json" in archive.namelist()
+
+
+def test_milwaukee_snapshot_endpoint_writes_diagnostics_json(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PCW_DATA_DIR", str(tmp_path / "data"))
+    client = TestClient(create_app(start_watchdog=False))
+
+    response = client.post("/milwaukee-cpc/snapshots", json={"findings": {"item_count": 1}})
+
+    assert response.status_code == 200
+    path = tmp_path / "data" / "diagnostics" / response.json()["filename"]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["source"] == "milwaukee_cpc_mvp"
+    assert payload["findings"]["item_count"] == 1
 
 
 def test_agenda_review_endpoint_updates_classification(monkeypatch, tmp_path) -> None:

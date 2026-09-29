@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 
 from . import statuses
 from .api import PlanCommissionWorkbench
+from .cities.milwaukee import MilwaukeeCpcMvpService
+from .legistar import LegistarClient
 from .models import RunRequest
 from .watchdog import RunWatchdog
 
@@ -25,6 +28,24 @@ class MadisonRunRequest(BaseModel):
     date_from: dt.date
     date_to: dt.date
     request_text: str | None = None
+
+
+class MilwaukeeMvpRequest(BaseModel):
+    """Purpose: choose local reading unless experimental LLM use is explicit."""
+
+    date_from: dt.date
+    date_to: dt.date
+    max_items: int = 6
+    documents_per_item: int = 5
+    processing_mode: Literal["local", "legacy_llm"] = "local"
+    use_ocr: bool = True
+    refresh_sources: bool = False
+    include_text: bool = False
+    include_llm: bool = False
+
+
+class MilwaukeeMvpSnapshotRequest(BaseModel):
+    findings: dict[str, Any]
 
 
 class ReviewRequest(BaseModel):
@@ -93,6 +114,16 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
     def review_screen(request: Request):
         return templates.TemplateResponse(request, "review.html", {"page": "review"})
 
+    @app.get("/milwaukee", response_class=HTMLResponse)
+    def milwaukee_screen(request: Request):
+        today = dt.date.today()
+        default_from = today.replace(day=1)
+        return templates.TemplateResponse(
+            request,
+            "milwaukee.html",
+            {"page": "milwaukee", "default_from": default_from.isoformat(), "default_to": today.isoformat()},
+        )
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "openai": workbench.openai_status()}
@@ -143,6 +174,57 @@ def create_app(start_watchdog: bool = True) -> FastAPI:
             return workbench.start_madison_run_worker(run_id, request)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Could not start run worker: {exc}") from exc
+
+    @app.post("/milwaukee-cpc/smoke-test")
+    def milwaukee_cpc_smoke_test(payload: MilwaukeeMvpRequest) -> dict[str, Any]:
+        """Purpose: keep local document reading independent of API credentials."""
+
+        if payload.processing_mode == "legacy_llm":
+            try:
+                workbench.require_openai_api_key()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        service = MilwaukeeCpcMvpService(
+            legistar=LegistarClient("milwaukee"),
+            docling=workbench.docling,
+            llm=workbench.llm,
+            tmp_root=workbench.runtime.tmp_dir,
+        )
+        try:
+            if payload.processing_mode == "local":
+                return service.run_local_test(
+                    date_from=payload.date_from,
+                    date_to=payload.date_to,
+                    max_items=payload.max_items,
+                    documents_per_item=payload.documents_per_item,
+                    use_ocr=payload.use_ocr,
+                    refresh_sources=payload.refresh_sources,
+                )
+            return service.run_smoke_test(
+                date_from=payload.date_from,
+                date_to=payload.date_to,
+                max_items=payload.max_items,
+                documents_per_item=payload.documents_per_item,
+                include_text=True,
+                include_llm=True,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Milwaukee MVP smoke test failed: {exc}") from exc
+
+    @app.post("/milwaukee-cpc/snapshots")
+    def save_milwaukee_cpc_snapshot(payload: MilwaukeeMvpSnapshotRequest) -> dict[str, Any]:
+        stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        path = workbench.runtime.diagnostics_dir / f"milwaukee_cpc_mvp_snapshot_{stamp}.json"
+        envelope = {
+            "created_utc": stamp,
+            "source": "milwaukee_cpc_mvp",
+            "findings": payload.findings,
+        }
+        try:
+            path.write_text(json.dumps(envelope, indent=2, default=str), encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not write Milwaukee snapshot: {exc}") from exc
+        return {"filename": path.name, "path": str(path)}
 
     @app.get("/runs")
     def runs() -> list[dict[str, Any]]:
